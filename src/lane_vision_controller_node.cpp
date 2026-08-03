@@ -88,7 +88,10 @@ private:
     WAIT_CONTROL_GRANT,
     INITIAL_SCAN_360,
     TURN_TO_INITIAL_TARGET,
-    FIND_AND_ALIGN,
+    TARGET_HOLD,
+    REACQUIRE_BUOY,
+    APPROACH_BUOY,
+    ALIGN_BUOY,
     INSERT_FORK,
     GO_BACK,
     VERIFY_RELEASE,
@@ -200,12 +203,19 @@ private:
     initial_target_reacquire_timeout_sec_ =
       declare_parameter<double>("initial_target_reacquire_timeout_sec", 5.0);
 
+    reacquire_yaw_pwm_ = declare_parameter<int>("reacquire_yaw_pwm", 1470);
+    reacquire_yaw_duration_sec_ =
+      declare_parameter<double>("reacquire_yaw_duration_sec", 0.5);
+    reacquire_timeout_sec_ = declare_parameter<double>("reacquire_timeout_sec", 1.0);
+
     align_target_x_ = declare_parameter<double>("align_target_x", 0.25);
     align_target_y_ = declare_parameter<double>("align_target_y", 0.50);
     align_deadband_x_ = declare_parameter<double>("align_deadband_x", 0.08);
     align_deadband_y_ = declare_parameter<double>("align_deadband_y", 0.10);
     capable_left_fill_ratio_ =
       declare_parameter<double>("capable_left_fill_ratio", 0.70);
+    align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
+    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.20);
 
     insert_fork_pwm_ = declare_parameter<int>("insert_fork_pwm", 1560);
     insert_fork_duration_sec_ =
@@ -232,6 +242,8 @@ private:
 
     lane_forward_pwm_ = declare_parameter<int>("lane_forward_pwm", 1700);
     approach_forward_pwm_ = declare_parameter<int>("approach_forward_pwm", 1560);
+    approach_forward_max_pwm_ =
+      declare_parameter<int>("approach_forward_max_pwm", 1700);
     waypoint_heading_tolerance_rad_ =
       declare_parameter<double>("waypoint_heading_tolerance_rad", 0.1745);
     waypoint_yaw_kp_ = declare_parameter<double>("waypoint_yaw_kp", 1.15);
@@ -317,6 +329,14 @@ private:
       verify_timeout_sec_ < verify_clear_sec_)
     {
       throw std::invalid_argument("fork and verification durations are invalid");
+    }
+    if (
+      reacquire_yaw_duration_sec_ < 0.0 ||
+      reacquire_timeout_sec_ < reacquire_yaw_duration_sec_ ||
+      align_stable_sec_ < 0.0 || approach_area_ratio_ <= 0.0 ||
+      approach_area_ratio_ > 1.0 || approach_forward_max_pwm_ < approach_forward_pwm_)
+    {
+      throw std::invalid_argument("approach and reacquire parameters are invalid");
     }
   }
 
@@ -624,6 +644,8 @@ private:
     active_lane_index_.reset();
     lane_completed_.assign(lane_planner_->lanes().size(), false);
     target_confirm_started_at_.reset();
+    target_hold_confirm_started_at_.reset();
+    align_stable_started_at_.reset();
     detection_confirm_started_at_.reset();
     ignore_detections_until_progress_m_.reset();
     mission_hold_depth_m_.reset();
@@ -680,8 +702,17 @@ private:
       case State::TURN_TO_INITIAL_TARGET:
         run_turn_to_initial_target(channels);
         break;
-      case State::FIND_AND_ALIGN:
-        run_find_and_align(channels);
+      case State::TARGET_HOLD:
+        run_target_hold(channels);
+        break;
+      case State::REACQUIRE_BUOY:
+        run_reacquire_buoy(channels);
+        break;
+      case State::APPROACH_BUOY:
+        run_approach_buoy(channels);
+        break;
+      case State::ALIGN_BUOY:
+        run_align_buoy(channels);
         break;
       case State::INSERT_FORK:
         run_insert_fork(channels);
@@ -784,11 +815,13 @@ private:
     }
   }
 
-  // 부표의 발견 위치와 처리 구간을 저장하고 접근 상태로 전환한다.
+  // 부표의 발견 위치와 처리 구간을 저장하고, 정지한 상태에서 재확인한다.
   void begin_target(const TargetContext context, const std::string & reason)
   {
     target_context_ = context;
     hard_attempted_ = false;
+    target_hold_confirm_started_at_.reset();
+    align_stable_started_at_.reset();
     if (context == TargetContext::LANE) {
       if (!active_lane_index_) {
         transition_to(State::FAILSAFE, "lane target selected without an active lane");
@@ -796,14 +829,83 @@ private:
       }
       target_departure_progress_m_ = active_lane_progress();
     }
-    transition_to(State::FIND_AND_ALIGN, reason);
+    transition_to(State::TARGET_HOLD, reason);
   }
 
-  // 부표를 왼쪽 화면 중앙에 정렬하고 허용 범위 안에서 접근한다.
-  void run_find_and_align(std::array<uint16_t, 18> & channels)
+  // buoy 검출 직후 수평 이동을 멈추고 동일 타깃의 안정 검출을 확인한다.
+  void run_target_hold(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_mission_depth(channels);
+    if (!recent(buoy_)) {
+      buoy_.reset();
+      target_hold_confirm_started_at_.reset();
+      transition_to(State::REACQUIRE_BUOY, "buoy lost while stopped");
+      return;
+    }
+
+    if (buoy_->consecutive_hits < target_confirm_hits_) {
+      target_hold_confirm_started_at_.reset();
+      return;
+    }
+    if (!target_hold_confirm_started_at_) {
+      target_hold_confirm_started_at_ = now();
+      return;
+    }
+    if ((now() - *target_hold_confirm_started_at_).seconds() >= target_confirm_sec_) {
+      transition_to(State::APPROACH_BUOY, "stable buoy confirmed while stopped");
+    }
+  }
+
+  // TARGET_HOLD에서 놓친 부표를 짧게 역방향 yaw로 다시 탐색한다.
+  void run_reacquire_buoy(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_mission_depth(channels);
+    if (state_age_sec() < reacquire_yaw_duration_sec_) {
+      set_channel(channels, yaw_channel_, reacquire_yaw_pwm_);
+    }
+    if (recent(buoy_)) {
+      target_hold_confirm_started_at_.reset();
+      transition_to(State::TARGET_HOLD, "buoy reacquired");
+      return;
+    }
+    if (state_age_sec() >= reacquire_timeout_sec_) {
+      finish_target(true, "buoy was not reacquired within timeout");
+    }
+  }
+
+  // buoy를 화면 중앙으로 접근시킨 뒤, 일정 크기에 도달하면 정밀 정렬한다.
+  void run_approach_buoy(std::array<uint16_t, 18> & channels)
   {
     if (!recent(buoy_)) {
-      finish_target(true, "buoy lost during approach");
+      buoy_.reset();
+      transition_to(State::REACQUIRE_BUOY, "buoy lost during approach");
+      return;
+    }
+    if (target_excursion_limit_reached()) {
+      finish_target(true, "target incapable within allowed excursion");
+      return;
+    }
+
+    apply_visual_tracking(
+      channels, *buoy_, approach_forward_pwm_from_area(*buoy_), 0.5, 0.5);
+    if (detection_area_ratio(*buoy_) >= approach_area_ratio_) {
+      align_stable_started_at_.reset();
+      transition_to(State::ALIGN_BUOY, "buoy reached approach area ratio");
+    }
+  }
+
+  // buoy를 포크 기준의 왼쪽 화면 목표점에 정렬하고, 충분히 가까울 때 삽입한다.
+  void run_align_buoy(std::array<uint16_t, 18> & channels)
+  {
+    if (!recent(buoy_)) {
+      buoy_.reset();
+      transition_to(State::REACQUIRE_BUOY, "buoy lost during fine alignment");
+      return;
+    }
+    if (target_excursion_limit_reached()) {
+      finish_target(true, "target incapable within allowed excursion");
       return;
     }
 
@@ -812,19 +914,31 @@ private:
     const bool aligned =
       std::abs(error_x) <= align_deadband_x_ &&
       std::abs(error_y) <= align_deadband_y_;
-    if (left_half_fill_ratio(*buoy_) >= capable_left_fill_ratio_) {
-      apply_visual_tracking(channels, *buoy_, neutral_pwm_);
-      if (aligned) {
-        transition_to(State::INSERT_FORK, "aligned buoy occupies capable left-half area");
-      }
-      return;
-    }
-    if (target_excursion_limit_reached()) {
-      finish_target(true, "target incapable within allowed excursion");
-      return;
-    }
+    const bool capable = left_half_fill_ratio(*buoy_) >= capable_left_fill_ratio_;
     apply_visual_tracking(
-      channels, *buoy_, aligned ? approach_forward_pwm_ : neutral_pwm_);
+      channels, *buoy_, capable ? neutral_pwm_ : approach_forward_pwm_,
+      align_target_x_, align_target_y_);
+    if (!capable || !aligned) {
+      align_stable_started_at_.reset();
+      return;
+    }
+    if (!align_stable_started_at_) {
+      align_stable_started_at_ = now();
+      return;
+    }
+    if ((now() - *align_stable_started_at_).seconds() >= align_stable_sec_) {
+      transition_to(State::INSERT_FORK, "aligned buoy occupies capable left-half area");
+    }
+  }
+
+  // bbox 면적비에 따라 멀리서는 빠르게, 가까워질수록 저속으로 접근한다.
+  int approach_forward_pwm_from_area(const Detection & buoy) const
+  {
+    const double ratio = detection_area_ratio(buoy);
+    const double fraction = std::clamp(
+      1.0 - ratio / approach_area_ratio_, 0.0, 1.0);
+    return approach_forward_pwm_ + static_cast<int>(std::lround(
+      fraction * static_cast<double>(approach_forward_max_pwm_ - approach_forward_pwm_)));
   }
 
   // 초기 반경 또는 활성 레인 오프셋 한계에 도달했는지 확인한다.
@@ -1080,11 +1194,11 @@ private:
   // 화면 오차와 수심 오차를 결합해 부표 추적 출력을 계산한다.
   void apply_visual_tracking(
     std::array<uint16_t, 18> & channels, const Detection & detection,
-    const int forward_pwm)
+    const int forward_pwm, const double target_x, const double target_y)
   {
     set_neutral_control(channels);
     const auto [error_x, error_y] =
-      normalized_error(detection, align_target_x_, align_target_y_);
+      normalized_error(detection, target_x, target_y);
 
     const double yaw_sign = vision_yaw_invert_ ? -1.0 : 1.0;
     const int yaw_pwm = neutral_pwm_ + static_cast<int>(
@@ -1258,7 +1372,10 @@ private:
       case State::WAIT_CONTROL_GRANT: return "WAIT_CONTROL_GRANT";
       case State::INITIAL_SCAN_360: return "INITIAL_SCAN_360";
       case State::TURN_TO_INITIAL_TARGET: return "TURN_TO_INITIAL_TARGET";
-      case State::FIND_AND_ALIGN: return "FIND_AND_ALIGN";
+      case State::TARGET_HOLD: return "TARGET_HOLD";
+      case State::REACQUIRE_BUOY: return "REACQUIRE_BUOY";
+      case State::APPROACH_BUOY: return "APPROACH_BUOY";
+      case State::ALIGN_BUOY: return "ALIGN_BUOY";
       case State::INSERT_FORK: return "INSERT_FORK";
       case State::GO_BACK: return "GO_BACK";
       case State::VERIFY_RELEASE: return "VERIFY_RELEASE";
@@ -1395,11 +1512,16 @@ private:
   int initial_scan_yaw_pwm_{1600};
   double initial_scan_completion_tolerance_rad_{0.15};
   double initial_target_reacquire_timeout_sec_{5.0};
+  int reacquire_yaw_pwm_{1470};
+  double reacquire_yaw_duration_sec_{0.5};
+  double reacquire_timeout_sec_{1.0};
   double align_target_x_{0.25};
   double align_target_y_{0.50};
   double align_deadband_x_{0.08};
   double align_deadband_y_{0.10};
   double capable_left_fill_ratio_{0.70};
+  double align_stable_sec_{0.7};
+  double approach_area_ratio_{0.20};
   int insert_fork_pwm_{1560};
   double insert_fork_duration_sec_{0.8};
   int insert_fork_hard_pwm_{1620};
@@ -1418,6 +1540,7 @@ private:
   double rc_pwm_span_{400.0};
   int lane_forward_pwm_{1700};
   int approach_forward_pwm_{1560};
+  int approach_forward_max_pwm_{1700};
   double waypoint_heading_tolerance_rad_{0.1745};
   double waypoint_yaw_kp_{1.15};
   double waypoint_yaw_ki_{0.15};
@@ -1452,6 +1575,8 @@ private:
   std::optional<double> mission_hold_depth_m_;
   std::optional<Detection> buoy_;
   std::optional<rclcpp::Time> target_confirm_started_at_;
+  std::optional<rclcpp::Time> target_hold_confirm_started_at_;
+  std::optional<rclcpp::Time> align_stable_started_at_;
   std::optional<rclcpp::Time> detection_confirm_started_at_;
 
   Vec2 handoff_position_{};

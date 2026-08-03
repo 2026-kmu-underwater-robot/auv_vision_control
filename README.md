@@ -22,11 +22,18 @@ Hydrophone 제어기로부터 제어권을 인계받은 뒤, 초기 부표를 �
 IDLE
   -> TARGET_CONFIRM
   -> WAIT_CONTROL_GRANT
-  -> (확정 buoy 있음) FIND_AND_ALIGN
+  -> (확정 buoy 있음) TARGET_HOLD
   -> (확정 buoy 없음) INITIAL_SCAN_360
        -> 가장 큰 bbox 후보 선택
        -> TURN_TO_INITIAL_TARGET
-       -> FIND_AND_ALIGN
+       -> TARGET_HOLD
+  -> TARGET_HOLD
+       -> 안정 검출: APPROACH_BUOY
+       -> bbox 유실: REACQUIRE_BUOY
+          -> 재검출: TARGET_HOLD
+          -> 재검출 실패: 레인 진행/복귀
+  -> APPROACH_BUOY
+  -> ALIGN_BUOY
   -> INSERT_FORK
   -> GO_BACK
   -> VERIFY_RELEASE
@@ -34,7 +41,7 @@ IDLE
        -> 실패: INSERT_FORK_HARD -> GO_BACK -> 가장 가까운 레인 끝점
   -> MOVE_TO_LANE_START
   -> LANE_FOLLOWING_WITH_SEARCH
-       -> buoy 발견: FIND_AND_ALIGN
+       -> buoy 발견: TARGET_HOLD → APPROACH_BUOY → ALIGN_BUOY
        -> 제거/포기 후 RETURN_TO_ACTIVE_LANE
        -> 기존 레인 주행 재개
   -> 모든 레인 완료
@@ -106,8 +113,15 @@ actual_spacing = 3.75 m
 
 ## 부표 접근과 판정
 
-buoy bbox 중심을 전체 이미지 정규화 좌표 `(0.25, 0.50)`, 즉 왼쪽 화면 절반의
-중앙에 정렬합니다. 정렬 오차가 deadband 안에 있을 때만 전진합니다.
+대상을 발견하면 먼저 `TARGET_HOLD`에서 yaw/forward를 중립으로 두고 안정 검출을
+확인합니다. bbox가 끊기면 `REACQUIRE_BUOY`에서 yaw `1470`을 0.5초 보낸 뒤,
+남은 시간은 yaw 중립으로 유지하며 총 1초 동안 재검출을 기다립니다.
+
+`APPROACH_BUOY`는 buoy bbox를 이미지 중앙 `(0.50, 0.50)`으로 추적하며, bbox가
+전체 화면의 `approach_area_ratio` 이상을 차지할 때까지 면적 기반으로 감속 전진합니다.
+이후 `ALIGN_BUOY`에서 bbox 중심을 `(0.25, 0.50)`, 즉 왼쪽 화면 절반의 중앙에
+정렬합니다. 정렬 중에도 충분히 가까워질 때까지 저속 전진하며, CAPABLE 조건과
+deadband 안정 시간이 모두 충족될 때만 삽입합니다.
 
 `CAPABLE` 판정은 다음 비율로 계산합니다.
 
@@ -161,7 +175,7 @@ depth = -pose.position.z
 유지합니다.
 
 - 레인 이동·회전·삽입·후퇴: 수심 PID만 사용
-- `FIND_AND_ALIGN`: 비전 상하 오차 40% + 수심 PID 60%
+- `APPROACH_BUOY`/`ALIGN_BUOY`: 비전 상하 오차 40% + 수심 PID 60%
 - 양성부력 보상과 PID 출력 제한 적용
 
 ## ROS 토픽
@@ -209,10 +223,16 @@ depth = -pose.position.z
 | `capable_left_fill_ratio` | 0.70 | CAPABLE bbox 점유율 |
 | `align_target_x` | 0.25 | buoy 정렬 목표 X |
 | `align_target_y` | 0.50 | buoy 정렬 목표 Y |
+| `approach_area_ratio` | 0.20 | APPROACH에서 ALIGN으로 전환할 bbox 면적비 |
+| `approach_forward_max_pwm` | 1700 | 멀리 있는 buoy 접근 최대 PWM |
+| `approach_forward_pwm` | 1560 | 가까운 buoy 접근 및 ALIGN 저속 PWM |
+| `align_stable_sec` | 0.7 | 삽입 전 deadband 안정 유지 시간 |
+| `reacquire_yaw_pwm` | 1470 | 부표 유실 뒤 재탐색 yaw PWM |
+| `reacquire_yaw_duration_sec` | 0.5 | 위 yaw를 유지하는 시간 |
+| `reacquire_timeout_sec` | 1.0 | 재검출 실패 시 레인 진행/복귀까지의 시간 |
 | `target_confirm_hits` | 4 | 연속 검출 횟수 |
 | `target_confirm_sec` | 0.3 | 연속 검출 후 유지 시간 |
 | `lane_forward_pwm` | 1700 | 레인/waypoint 전진 PWM |
-| `approach_forward_pwm` | 1560 | 정렬 후 접근 PWM |
 | `insert_fork_pwm` | 1560 | 일반 삽입 PWM |
 | `insert_fork_hard_pwm` | 1620 | 강한 삽입 PWM |
 | `go_back_pwm` | 1420 | 후퇴 PWM |
