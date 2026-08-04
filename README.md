@@ -33,16 +33,14 @@ IDLE
           -> 재검출: TARGET_HOLD
           -> 재검출 실패: 레인 진행/복귀
   -> APPROACH_BUOY
-  -> ALIGN_BUOY
-  -> INSERT_FORK
-  -> GO_BACK
-  -> VERIFY_RELEASE
-       -> 성공: 가장 가까운 레인 끝점으로 이동
-       -> 실패: INSERT_FORK_HARD -> GO_BACK -> 가장 가까운 레인 끝점
+       -> bbox 면적비 0.03 이상을 2초 연속 유지
+  -> STRONG_FORWARD
+  -> STRONG_BACKOFF
+       -> 가장 가까운 레인 끝점으로 이동
   -> MOVE_TO_LANE_START
   -> LANE_FOLLOWING_WITH_SEARCH
-       -> buoy 발견: TARGET_HOLD → APPROACH_BUOY → ALIGN_BUOY
-       -> 제거/포기 후 RETURN_TO_ACTIVE_LANE
+       -> buoy 발견: TARGET_HOLD → APPROACH_BUOY → STRONG_FORWARD → STRONG_BACKOFF
+       -> 처리/포기 후 RETURN_TO_ACTIVE_LANE
        -> 기존 레인 주행 재개
   -> 모든 레인 완료
   -> COMPLETE
@@ -117,11 +115,11 @@ actual_spacing = 3.75 m
 확인합니다. bbox가 끊기면 `REACQUIRE_BUOY`에서 yaw `1470`을 0.5초 보낸 뒤,
 남은 시간은 yaw 중립으로 유지하며 총 1초 동안 재검출을 기다립니다.
 
-`APPROACH_BUOY`는 buoy bbox를 이미지 중앙 `(0.50, 0.50)`으로 추적하며, bbox가
+`APPROACH_BUOY`는 buoy bbox를 화면 목표점 `(0.50, 0.30)`으로 추적하며, bbox가
 전체 화면의 `approach_area_ratio` 이상을 차지할 때까지 면적 기반으로 감속 전진합니다.
-이후 `ALIGN_BUOY`에서 bbox 중심을 오른쪽 위 목표점 `(0.85, 0.25)`로 계속
-추적합니다. bbox 중심이 오른쪽 위 허용 영역 `x >= 0.50`, `y <= 0.50`에
-`align_stable_sec` 동안 유지되면 강한 전진 삽입을 시작합니다.
+목표 면적에 도달하면 전진 채널을 중립으로 두되 목표점 정렬과 수심 제어는 계속합니다.
+목표 면적을 `approach_close_hold_sec` 동안 연속 유지하면 `STRONG_FORWARD`로
+전환합니다. 유지 중 면적이 기준 아래로 내려가면 2초 타이머는 처음부터 다시 셉니다.
 
 접근 허용 범위:
 
@@ -129,22 +127,21 @@ actual_spacing = 3.75 m
 - 레인 탐색 부표: 현재 활성 레인으로부터 수직 거리 `2.0 m`
 - arena 안전 경계 밖으로 이동할 수 없음
 
-허용 범위 끝까지 접근해도 정렬 허용 영역에 진입하지 못하면 `INCAPABLE`로 판단합니다.
+허용 범위 끝까지 접근해도 목표 면적에 도달하지 못하면 `INCAPABLE`로 판단합니다.
 활성 레인의 가장 가까운 지점으로 복귀한 뒤, 기존 진행 방향으로 `2.0 m` 이동할
 때까지 bbox를 무시해 같은 부표를 반복 추적하지 않습니다.
 
-## 삽입과 확인
+## 강한 전진과 후진
 
 기본 PWM과 지속 시간:
 
 | 동작 | PWM | 시간 |
 |---|---:|---:|
-| 일반 삽입 | 1560 | 0.8 s |
-| 강한 삽입 | 1620 | 0.8 s |
-| 후퇴 | 1420 | 0.5 s |
+| 강한 전진 | 1700 | 5.0 s |
+| 강한 후진 | 1300 | 3.0 s |
 
-일반 삽입 후 후퇴하고 buoy가 사라졌는지 확인합니다. buoy가 남아 있으면 강한
-삽입을 한 번 수행하고 후퇴한 뒤 레인으로 복귀합니다.
+강한 전진과 강한 후진을 각각 한 번 수행한 뒤 초기 대상이면 다음 레인으로,
+레인 주행 중 대상이면 기존 활성 레인으로 복귀합니다.
 
 ## 수심 제어
 
@@ -164,8 +161,8 @@ depth = -pose.position.z
 제어권 승인 순간의 현재 수심을 `mission_hold_depth`로 저장하고 전체 미션 동안
 유지합니다.
 
-- 레인 이동·회전·삽입·후퇴: 수심 PID만 사용
-- `APPROACH_BUOY`/`ALIGN_BUOY`: 비전 상하 오차 40% + 수심 PID 60%
+- 레인 이동·회전·강한 전진·후진: 수심 PID만 사용
+- `APPROACH_BUOY`: 비전 상하 오차 40% + 수심 PID 60%
 - 양성부력 보상과 PID 출력 제한 적용
 
 ## ROS 토픽
@@ -221,14 +218,19 @@ depth = -pose.position.z
 | `lane_search_offset_m` | 2.0 | 활성 레인 좌우 접근 한계와 레인 계산 기준 |
 | `incapable_skip_distance_m` | 2.0 | 포기 후 bbox 무시 주행 거리 |
 | `initial_search_radius_m` | 2.0 | 초기 인계 위치 기준 접근 반경 |
-| `align_target_x` | 0.85 | ALIGN에서 계속 추종할 buoy 중심 X |
-| `align_target_y` | 0.25 | ALIGN에서 계속 추종할 buoy 중심 Y |
-| `align_zone_min_x` | 0.50 | 삽입 전이 허용 영역의 최소 X |
-| `align_zone_max_y` | 0.50 | 삽입 전이 허용 영역의 최대 Y |
-| `approach_area_ratio` | 0.005 | APPROACH에서 ALIGN으로 전환할 bbox 면적비 |
+| `initial_scan_yaw_pwm` | 1560 | 초기 부표가 없을 때 360도 탐색 Yaw PWM |
+| `approach_target_x` | 0.50 | APPROACH에서 추종할 buoy 중심 X |
+| `approach_target_y` | 0.30 | APPROACH에서 추종할 buoy 중심 Y |
+| `approach_area_ratio` | 0.03 | 전진을 멈추고 근접 정렬을 시작할 bbox 면적비 |
+| `approach_close_hold_sec` | 2.0 | 목표 면적을 연속 유지한 뒤 강한 전진할 시간 |
 | `approach_forward_max_pwm` | 1700 | 멀리 있는 buoy 접근 최대 PWM |
 | `approach_forward_pwm` | 1560 | 가까운 buoy 접근 최소 PWM |
-| `align_stable_sec` | 0.7 | 삽입 전 허용 영역 유지 시간 |
+| `strong_forward_pwm` | 1700 | 근접 정렬 완료 후 강한 전진 PWM |
+| `strong_forward_duration_sec` | 5.0 | 강한 전진 시간 |
+| `strong_backoff_pwm` | 1300 | 강한 후진 PWM |
+| `strong_backoff_duration_sec` | 3.0 | 강한 후진 시간 |
+| `vision_yaw_kp_pwm` | 100.0 | 정규화 수평 오차 1.0당 Yaw PWM gain |
+| `max_vision_yaw_delta_pwm` | 100 | 중립 기준 Yaw 보정량 제한 |
 | `reacquire_yaw_pwm` | 1470 | 부표 유실 뒤 재탐색 yaw PWM |
 | `reacquire_yaw_duration_sec` | 0.5 | 위 yaw를 유지하는 시간 |
 | `reacquire_timeout_sec` | 1.0 | 재검출 실패 시 레인 진행/복귀까지의 시간 |
@@ -237,12 +239,6 @@ depth = -pose.position.z
 | `buoy_confidence_similar_delta` | 0.05 | 두 confidence를 비슷하다고 보는 차이 |
 | `buoy_same_target_center_ratio` | 0.12 | 같은 타깃으로 보는 축별 중심 거리 비율 |
 | `lane_forward_pwm` | 1700 | 레인/waypoint 전진 PWM |
-| `insert_fork_pwm` | 1700 | 강한 전진 삽입 PWM |
-| `insert_fork_duration_sec` | 1.2 | 강한 전진 삽입 시간 |
-| `insert_fork_hard_pwm` | 1700 | 재시도 강한 삽입 PWM |
-| `insert_fork_hard_duration_sec` | 1.2 | 재시도 강한 삽입 시간 |
-| `go_back_pwm` | 1300 | 강한 후퇴 PWM |
-| `go_back_duration_sec` | 1.2 | 강한 후퇴 시간 |
 | `odometry_timeout_sec` | 0.5 | odom FAILSAFE 시간 |
 | `depth_timeout_sec` | 1.0 | 수심 FAILSAFE 시간 |
 | `max_depth_m` | 10.5 | 최대 허용 수심 |
@@ -264,6 +260,31 @@ source install/setup.bash
 
 ```bash
 ros2 run auv_lane_vision_control lane_vision_controller_node
+```
+
+모든 노드 파라미터를 launch argument로 변경할 수 있는 통합 실행:
+
+```bash
+ros2 launch auv_lane_vision_control lane_vision_controller.launch.py
+```
+
+사용 가능한 전체 launch argument 확인:
+
+```bash
+ros2 launch auv_lane_vision_control lane_vision_controller.launch.py --show-args
+```
+
+launch 실행 시 파라미터 변경 예:
+
+```bash
+ros2 launch auv_lane_vision_control lane_vision_controller.launch.py \
+  initial_scan_yaw_pwm:=1560 \
+  approach_target_x:=0.50 \
+  approach_target_y:=0.30 \
+  approach_area_ratio:=0.03 \
+  strong_forward_duration_sec:=5.0 \
+  strong_backoff_duration_sec:=3.0 \
+  vision_yaw_kp_pwm:=100.0
 ```
 
 파라미터 변경 예:

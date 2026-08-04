@@ -91,11 +91,8 @@ private:
     TARGET_HOLD,
     REACQUIRE_BUOY,
     APPROACH_BUOY,
-    ALIGN_BUOY,
-    INSERT_FORK,
-    GO_BACK,
-    VERIFY_RELEASE,
-    INSERT_FORK_HARD,
+    STRONG_FORWARD,
+    STRONG_BACKOFF,
     MOVE_TO_LANE_START,
     LANE_FOLLOWING_WITH_SEARCH,
     RETURN_TO_ACTIVE_LANE,
@@ -199,7 +196,7 @@ private:
 
     initial_search_radius_m_ =
       declare_parameter<double>("initial_search_radius_m", 2.0);
-    initial_scan_yaw_pwm_ = declare_parameter<int>("initial_scan_yaw_pwm", 1600);
+    initial_scan_yaw_pwm_ = declare_parameter<int>("initial_scan_yaw_pwm", 1560);
     initial_scan_completion_tolerance_rad_ =
       declare_parameter<double>("initial_scan_completion_tolerance_rad", 0.15);
     initial_target_reacquire_timeout_sec_ =
@@ -210,25 +207,18 @@ private:
       declare_parameter<double>("reacquire_yaw_duration_sec", 0.5);
     reacquire_timeout_sec_ = declare_parameter<double>("reacquire_timeout_sec", 1.0);
 
-    // 테스트 패키지와 동일하게 오른쪽 위 목표점을 계속 추종하되,
-    // 더 넓은 오른쪽 위 영역을 삽입 전이 조건으로 사용한다.
-    align_target_x_ = declare_parameter<double>("align_target_x", 0.85);
-    align_target_y_ = declare_parameter<double>("align_target_y", 0.25);
-    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.50);
-    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.50);
-    align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
-    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.005);
+    // 화면 가로 중앙, 세로 30% 지점을 추종하며 접근한다.
+    approach_target_x_ = declare_parameter<double>("approach_target_x", 0.50);
+    approach_target_y_ = declare_parameter<double>("approach_target_y", 0.30);
+    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.03);
+    approach_close_hold_sec_ = declare_parameter<double>("approach_close_hold_sec", 2.0);
 
-    insert_fork_pwm_ = declare_parameter<int>("insert_fork_pwm", 1700);
-    insert_fork_duration_sec_ =
-      declare_parameter<double>("insert_fork_duration_sec", 1.2);
-    insert_fork_hard_pwm_ = declare_parameter<int>("insert_fork_hard_pwm", 1700);
-    insert_fork_hard_duration_sec_ =
-      declare_parameter<double>("insert_fork_hard_duration_sec", 1.2);
-    go_back_pwm_ = declare_parameter<int>("go_back_pwm", 1300);
-    go_back_duration_sec_ = declare_parameter<double>("go_back_duration_sec", 1.2);
-    verify_clear_sec_ = declare_parameter<double>("verify_clear_sec", 1.0);
-    verify_timeout_sec_ = declare_parameter<double>("verify_timeout_sec", 3.0);
+    strong_forward_pwm_ = declare_parameter<int>("strong_forward_pwm", 1700);
+    strong_forward_duration_sec_ =
+      declare_parameter<double>("strong_forward_duration_sec", 5.0);
+    strong_backoff_pwm_ = declare_parameter<int>("strong_backoff_pwm", 1300);
+    strong_backoff_duration_sec_ =
+      declare_parameter<double>("strong_backoff_duration_sec", 3.0);
   }
 
   // 이동과 수심 유지에 필요한 제어 파라미터를 선언한다.
@@ -257,8 +247,9 @@ private:
       declare_parameter<int>("max_waypoint_yaw_delta_pwm", 180);
     waypoint_yaw_invert_ = declare_parameter<bool>("waypoint_yaw_invert", true);
 
+    vision_yaw_kp_pwm_ = declare_parameter<double>("vision_yaw_kp_pwm", 100.0);
     max_vision_yaw_delta_pwm_ =
-      declare_parameter<int>("max_vision_yaw_delta_pwm", 180);
+      declare_parameter<int>("max_vision_yaw_delta_pwm", 100);
     max_vision_throttle_delta_pwm_ =
       declare_parameter<int>("max_vision_throttle_delta_pwm", 100);
     vision_yaw_invert_ = declare_parameter<bool>("vision_yaw_invert", false);
@@ -317,15 +308,12 @@ private:
       throw std::invalid_argument("detection and initial search parameters are invalid");
     }
     if (
-      !std::isfinite(align_target_x_) || !std::isfinite(align_target_y_) ||
-      align_target_x_ < 0.0 || align_target_x_ > 1.0 ||
-      align_target_y_ < 0.0 || align_target_y_ > 1.0 ||
-      !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
-      align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
-      align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0 ||
-      !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0)
+      !std::isfinite(approach_target_x_) || !std::isfinite(approach_target_y_) ||
+      approach_target_x_ < 0.0 || approach_target_x_ > 1.0 ||
+      approach_target_y_ < 0.0 || approach_target_y_ > 1.0 ||
+      !std::isfinite(approach_close_hold_sec_) || approach_close_hold_sec_ < 0.0)
     {
-      throw std::invalid_argument("invalid alignment target, zone, or stable time");
+      throw std::invalid_argument("invalid approach target or close hold time");
     }
     if (
       approach_vision_throttle_weight_ < 0.0 ||
@@ -334,17 +322,16 @@ private:
       throw std::invalid_argument("approach_vision_throttle_weight must be in [0, 1]");
     }
     if (
-      insert_fork_duration_sec_ < 0.0 || insert_fork_hard_duration_sec_ < 0.0 ||
-      go_back_duration_sec_ < 0.0 || verify_clear_sec_ < 0.0 ||
-      verify_timeout_sec_ < verify_clear_sec_)
-    {
-      throw std::invalid_argument("fork and verification durations are invalid");
-    }
-    if (
       reacquire_yaw_duration_sec_ < 0.0 ||
       reacquire_timeout_sec_ < reacquire_yaw_duration_sec_ ||
       approach_area_ratio_ <= 0.0 ||
-      approach_area_ratio_ > 1.0 || approach_forward_max_pwm_ < approach_forward_pwm_)
+      approach_area_ratio_ > 1.0 || approach_forward_max_pwm_ < approach_forward_pwm_ ||
+      !std::isfinite(strong_forward_duration_sec_) || strong_forward_duration_sec_ < 0.0 ||
+      !std::isfinite(strong_backoff_duration_sec_) || strong_backoff_duration_sec_ < 0.0 ||
+      strong_forward_pwm_ < min_pwm_ || strong_forward_pwm_ > max_pwm_ ||
+      strong_backoff_pwm_ < min_pwm_ || strong_backoff_pwm_ > max_pwm_ ||
+      !std::isfinite(vision_yaw_kp_pwm_) || vision_yaw_kp_pwm_ < 0.0 ||
+      max_vision_yaw_delta_pwm_ < 0)
     {
       throw std::invalid_argument("approach and reacquire parameters are invalid");
     }
@@ -684,12 +671,11 @@ private:
     lane_completed_.assign(lane_planner_->lanes().size(), false);
     target_confirm_started_at_.reset();
     target_hold_confirm_started_at_.reset();
-    align_stable_started_at_.reset();
+    approach_close_started_at_.reset();
     detection_confirm_started_at_.reset();
     ignore_detections_until_progress_m_.reset();
     mission_hold_depth_m_.reset();
     vision_has_control_ = false;
-    hard_attempted_ = false;
     reset_waypoint_pid();
     reset_depth_pid();
   }
@@ -750,20 +736,11 @@ private:
       case State::APPROACH_BUOY:
         run_approach_buoy(channels);
         break;
-      case State::ALIGN_BUOY:
-        run_align_buoy(channels);
+      case State::STRONG_FORWARD:
+        run_strong_forward(channels);
         break;
-      case State::INSERT_FORK:
-        run_insert_fork(channels);
-        break;
-      case State::GO_BACK:
-        run_go_back(channels);
-        break;
-      case State::VERIFY_RELEASE:
-        run_verify_release(channels);
-        break;
-      case State::INSERT_FORK_HARD:
-        run_insert_fork_hard(channels);
+      case State::STRONG_BACKOFF:
+        run_strong_backoff(channels);
         break;
       case State::MOVE_TO_LANE_START:
         run_move_to_lane_start(channels);
@@ -858,9 +835,8 @@ private:
   void begin_target(const TargetContext context, const std::string & reason)
   {
     target_context_ = context;
-    hard_attempted_ = false;
     target_hold_confirm_started_at_.reset();
-    align_stable_started_at_.reset();
+    approach_close_started_at_.reset();
     if (context == TargetContext::LANE) {
       if (!active_lane_index_) {
         transition_to(State::FAILSAFE, "lane target selected without an active lane");
@@ -914,7 +890,7 @@ private:
     }
   }
 
-  // buoy를 화면 중앙으로 접근시킨 뒤, 일정 크기에 도달하면 정밀 정렬한다.
+  // 목표점 (0.50, 0.30)으로 정렬하며 접근하고, 목표 면적을 2초 유지하면 강한 전진한다.
   void run_approach_buoy(std::array<uint16_t, 18> & channels)
   {
     if (!recent(buoy_)) {
@@ -927,46 +903,48 @@ private:
       return;
     }
 
+    const bool close_enough = detection_area_ratio(*buoy_) >= approach_area_ratio_;
+    const int forward_pwm =
+      close_enough ? neutral_pwm_ : approach_forward_pwm_from_area(*buoy_);
     apply_visual_tracking(
-      channels, *buoy_, approach_forward_pwm_from_area(*buoy_), 0.5, 0.5);
-    if (detection_area_ratio(*buoy_) >= approach_area_ratio_) {
-      align_stable_started_at_.reset();
-      transition_to(State::ALIGN_BUOY, "buoy reached approach area ratio");
+      channels, *buoy_, forward_pwm, approach_target_x_, approach_target_y_);
+
+    if (close_enough) {
+      if (!approach_close_started_at_) {
+        approach_close_started_at_ = now();
+      } else if (
+        (now() - *approach_close_started_at_).seconds() >= approach_close_hold_sec_)
+      {
+        transition_to(State::STRONG_FORWARD, "close buoy held for approach delay");
+      }
+    } else {
+      approach_close_started_at_.reset();
     }
   }
 
-  // buoy 중심을 오른쪽 위 목표점으로 계속 제어하고, 넓은 허용 영역에서 삽입한다.
-  void run_align_buoy(std::array<uint16_t, 18> & channels)
+  // 테스트 패키지와 동일한 강한 전진 펄스.
+  void run_strong_forward(std::array<uint16_t, 18> & channels)
   {
-    if (!recent(buoy_)) {
-      buoy_.reset();
-      transition_to(State::REACQUIRE_BUOY, "buoy lost during fine alignment");
+    set_neutral_control(channels);
+    hold_mission_depth(channels);
+    if (state_age_sec() >= strong_forward_duration_sec_) {
+      transition_to(State::STRONG_BACKOFF, "strong forward pulse complete");
+      set_channel(channels, forward_channel_, strong_backoff_pwm_);
       return;
     }
-    if (target_excursion_limit_reached()) {
-      finish_target(true, "target incapable within allowed excursion");
-      return;
-    }
+    set_channel(channels, forward_channel_, strong_forward_pwm_);
+  }
 
-    const double x = buoy_->center_x / buoy_->image_width;
-    const double y = buoy_->center_y / buoy_->image_height;
-    const bool in_alignment_zone =
-      x >= align_zone_min_x_ && y <= align_zone_max_y_;
-
-    // 허용 영역 안에서도 목표점 (0.85, 0.25)을 향한 보정을 계속한다.
-    apply_visual_tracking(
-      channels, *buoy_, neutral_pwm_, align_target_x_, align_target_y_);
-    if (!in_alignment_zone) {
-      align_stable_started_at_.reset();
+  // 강한 후진 뒤 기존 미션 문맥의 레인 탐색 흐름으로 복귀한다.
+  void run_strong_backoff(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_mission_depth(channels);
+    if (state_age_sec() < strong_backoff_duration_sec_) {
+      set_channel(channels, forward_channel_, strong_backoff_pwm_);
       return;
     }
-    if (!align_stable_started_at_) {
-      align_stable_started_at_ = now();
-      return;
-    }
-    if ((now() - *align_stable_started_at_).seconds() >= align_stable_sec_) {
-      transition_to(State::INSERT_FORK, "buoy remained in alignment zone");
-    }
+    finish_target(false, "strong forward/backoff cycle complete");
   }
 
   // bbox 면적비에 따라 멀리서는 빠르게, 가까워질수록 저속으로 접근한다.
@@ -993,63 +971,6 @@ private:
     }
     return lane_planner_->cross_track_distance(
       current_position_, *active_lane_index_) >= lane_search_offset_m_;
-  }
-
-  // 설정된 시간 동안 일반 삽입 출력을 적용한다.
-  void run_insert_fork(std::array<uint16_t, 18> & channels)
-  {
-    set_neutral_control(channels);
-    hold_mission_depth(channels);
-    if (state_age_sec() >= insert_fork_duration_sec_) {
-      transition_to(State::GO_BACK, "normal fork insertion complete");
-      set_channel(channels, forward_channel_, go_back_pwm_);
-      return;
-    }
-    set_channel(channels, forward_channel_, insert_fork_pwm_);
-  }
-
-  // 설정된 시간 동안 후퇴한 뒤 결과 확인 또는 복귀로 전환한다.
-  void run_go_back(std::array<uint16_t, 18> & channels)
-  {
-    set_neutral_control(channels);
-    hold_mission_depth(channels);
-    if (state_age_sec() < go_back_duration_sec_) {
-      set_channel(channels, forward_channel_, go_back_pwm_);
-      return;
-    }
-    if (hard_attempted_) {
-      finish_target(true, "hard insertion and backoff complete");
-    } else {
-      transition_to(State::VERIFY_RELEASE, "normal backoff complete");
-    }
-  }
-
-  // 후퇴 뒤 부표 검출 여부로 일반 삽입의 성공을 확인한다.
-  void run_verify_release(std::array<uint16_t, 18> & channels)
-  {
-    set_neutral_control(channels);
-    hold_mission_depth(channels);
-    if (!recent(buoy_) && state_age_sec() >= verify_clear_sec_) {
-      finish_target(false, "buoy absent after backoff");
-      return;
-    }
-    if (state_age_sec() >= verify_timeout_sec_) {
-      transition_to(State::INSERT_FORK_HARD, "normal insertion did not release buoy");
-    }
-  }
-
-  // 일반 삽입 실패 후 설정된 시간 동안 강한 삽입 출력을 적용한다.
-  void run_insert_fork_hard(std::array<uint16_t, 18> & channels)
-  {
-    set_neutral_control(channels);
-    hold_mission_depth(channels);
-    if (state_age_sec() >= insert_fork_hard_duration_sec_) {
-      hard_attempted_ = true;
-      transition_to(State::GO_BACK, "hard fork insertion complete");
-      set_channel(channels, forward_channel_, go_back_pwm_);
-      return;
-    }
-    set_channel(channels, forward_channel_, insert_fork_hard_pwm_);
   }
 
   // 부표 처리 기록을 정리하고 시작점 이동 또는 활성 레인 복귀를 준비한다.
@@ -1239,9 +1160,10 @@ private:
       normalized_error(detection, target_x, target_y);
 
     const double yaw_sign = vision_yaw_invert_ ? -1.0 : 1.0;
-    const int yaw_pwm = neutral_pwm_ + static_cast<int>(
-      yaw_sign * error_x * static_cast<double>(max_vision_yaw_delta_pwm_));
-    set_channel(channels, yaw_channel_, yaw_pwm);
+    const int yaw_delta_pwm = std::clamp(
+      static_cast<int>(std::lround(yaw_sign * error_x * vision_yaw_kp_pwm_)),
+      -max_vision_yaw_delta_pwm_, max_vision_yaw_delta_pwm_);
+    set_channel(channels, yaw_channel_, neutral_pwm_ + yaw_delta_pwm);
 
     const double vertical_sign = vertical_positive_is_up_ ? -1.0 : 1.0;
     const int vision_throttle = neutral_pwm_ + static_cast<int>(
@@ -1381,6 +1303,9 @@ private:
       state_name(state_), state_name(next), reason.c_str());
     state_ = next;
     state_entered_at_ = now();
+    if (next == State::APPROACH_BUOY) {
+      approach_close_started_at_.reset();
+    }
     publish_state();
   }
 
@@ -1396,11 +1321,8 @@ private:
       case State::TARGET_HOLD: return "TARGET_HOLD";
       case State::REACQUIRE_BUOY: return "REACQUIRE_BUOY";
       case State::APPROACH_BUOY: return "APPROACH_BUOY";
-      case State::ALIGN_BUOY: return "ALIGN_BUOY";
-      case State::INSERT_FORK: return "INSERT_FORK";
-      case State::GO_BACK: return "GO_BACK";
-      case State::VERIFY_RELEASE: return "VERIFY_RELEASE";
-      case State::INSERT_FORK_HARD: return "INSERT_FORK_HARD";
+      case State::STRONG_FORWARD: return "STRONG_FORWARD";
+      case State::STRONG_BACKOFF: return "STRONG_BACKOFF";
       case State::MOVE_TO_LANE_START: return "MOVE_TO_LANE_START";
       case State::LANE_FOLLOWING_WITH_SEARCH: return "LANE_FOLLOWING_WITH_SEARCH";
       case State::RETURN_TO_ACTIVE_LANE: return "RETURN_TO_ACTIVE_LANE";
@@ -1531,26 +1453,20 @@ private:
   double buoy_same_target_center_ratio_{0.12};
   double lpf_tau_sec_{0.3};
   double initial_search_radius_m_{2.0};
-  int initial_scan_yaw_pwm_{1600};
+  int initial_scan_yaw_pwm_{1560};
   double initial_scan_completion_tolerance_rad_{0.15};
   double initial_target_reacquire_timeout_sec_{5.0};
   int reacquire_yaw_pwm_{1470};
   double reacquire_yaw_duration_sec_{0.5};
   double reacquire_timeout_sec_{1.0};
-  double align_target_x_{0.85};
-  double align_target_y_{0.25};
-  double align_zone_min_x_{0.50};
-  double align_zone_max_y_{0.50};
-  double align_stable_sec_{0.7};
-  double approach_area_ratio_{0.005};
-  int insert_fork_pwm_{1700};
-  double insert_fork_duration_sec_{1.2};
-  int insert_fork_hard_pwm_{1700};
-  double insert_fork_hard_duration_sec_{1.2};
-  int go_back_pwm_{1300};
-  double go_back_duration_sec_{1.2};
-  double verify_clear_sec_{1.0};
-  double verify_timeout_sec_{3.0};
+  double approach_target_x_{0.50};
+  double approach_target_y_{0.30};
+  double approach_area_ratio_{0.03};
+  double approach_close_hold_sec_{2.0};
+  int strong_forward_pwm_{1700};
+  double strong_forward_duration_sec_{5.0};
+  int strong_backoff_pwm_{1300};
+  double strong_backoff_duration_sec_{3.0};
 
   int throttle_channel_{3};
   int yaw_channel_{4};
@@ -1569,7 +1485,8 @@ private:
   double waypoint_yaw_integral_limit_{2.0};
   int max_waypoint_yaw_delta_pwm_{180};
   bool waypoint_yaw_invert_{true};
-  int max_vision_yaw_delta_pwm_{180};
+  double vision_yaw_kp_pwm_{100.0};
+  int max_vision_yaw_delta_pwm_{100};
   int max_vision_throttle_delta_pwm_{100};
   bool vision_yaw_invert_{false};
   bool vertical_positive_is_up_{true};
@@ -1597,7 +1514,7 @@ private:
   std::optional<Detection> buoy_;
   std::optional<rclcpp::Time> target_confirm_started_at_;
   std::optional<rclcpp::Time> target_hold_confirm_started_at_;
-  std::optional<rclcpp::Time> align_stable_started_at_;
+  std::optional<rclcpp::Time> approach_close_started_at_;
   std::optional<rclcpp::Time> detection_confirm_started_at_;
 
   Vec2 handoff_position_{};
@@ -1605,7 +1522,6 @@ private:
   double scan_previous_yaw_rad_{0.0};
   double scan_accumulated_yaw_rad_{0.0};
   double initial_target_yaw_rad_{0.0};
-  bool hard_attempted_{false};
 
   std::vector<bool> lane_completed_;
   std::optional<std::size_t> active_lane_index_;
