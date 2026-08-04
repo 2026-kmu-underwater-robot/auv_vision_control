@@ -119,19 +119,9 @@ actual_spacing = 3.75 m
 
 `APPROACH_BUOY`는 buoy bbox를 이미지 중앙 `(0.50, 0.50)`으로 추적하며, bbox가
 전체 화면의 `approach_area_ratio` 이상을 차지할 때까지 면적 기반으로 감속 전진합니다.
-이후 `ALIGN_BUOY`에서 bbox 중심을 `(0.25, 0.50)`, 즉 왼쪽 화면 절반의 중앙에
-정렬합니다. 정렬 중에도 충분히 가까워질 때까지 저속 전진하며, CAPABLE 조건과
-deadband 안정 시간이 모두 충족될 때만 삽입합니다.
-
-`CAPABLE` 판정은 다음 비율로 계산합니다.
-
-```text
-left_fill_ratio =
-  (buoy bbox와 왼쪽 화면 절반의 교차 면적)
-  / (왼쪽 화면 절반의 전체 면적)
-```
-
-기본적으로 `left_fill_ratio >= 0.70`이고 정렬까지 완료되면 포크를 삽입합니다.
+이후 `ALIGN_BUOY`에서 bbox 중심을 오른쪽 위 목표점 `(0.85, 0.25)`로 계속
+추적합니다. bbox 중심이 오른쪽 위 허용 영역 `x >= 0.50`, `y <= 0.50`에
+`align_stable_sec` 동안 유지되면 강한 전진 삽입을 시작합니다.
 
 접근 허용 범위:
 
@@ -139,7 +129,7 @@ left_fill_ratio =
 - 레인 탐색 부표: 현재 활성 레인으로부터 수직 거리 `2.0 m`
 - arena 안전 경계 밖으로 이동할 수 없음
 
-허용 범위 끝까지 접근해도 70% 조건을 만족하지 못하면 `INCAPABLE`로 판단합니다.
+허용 범위 끝까지 접근해도 정렬 허용 영역에 진입하지 못하면 `INCAPABLE`로 판단합니다.
 활성 레인의 가장 가까운 지점으로 복귀한 뒤, 기존 진행 방향으로 `2.0 m` 이동할
 때까지 bbox를 무시해 같은 부표를 반복 추적하지 않습니다.
 
@@ -213,6 +203,17 @@ depth = -pose.position.z
 
 `detected >= 0.5`이고 `class_id == buoy_class_id`인 검출만 사용합니다.
 
+여러 부표가 동시에 보이면 `auv_test_vision`과 같은 순서로 타깃을 고릅니다.
+
+1. bbox 면적이 다르면 항상 면적이 큰 부표
+2. 면적이 같고 confidence 차이가 `buoy_confidence_similar_delta`보다 크면
+   confidence가 높은 부표
+3. 면적이 같고 confidence도 비슷하면 화면에서 더 오른쪽에 있는 부표
+
+탐색·정지 확인·재탐색 중에는 위 조건에 따라 더 좋은 후보로 바꿀 수 있습니다.
+`APPROACH_BUOY` 이후에는 중심 위치가 같은 타깃으로 판정되는 bbox만 갱신하므로,
+접근 도중 다른 부표로 타깃이 바뀌지 않습니다.
+
 ## 주요 파라미터
 
 | 파라미터 | 기본값 | 설명 |
@@ -220,22 +221,28 @@ depth = -pose.position.z
 | `lane_search_offset_m` | 2.0 | 활성 레인 좌우 접근 한계와 레인 계산 기준 |
 | `incapable_skip_distance_m` | 2.0 | 포기 후 bbox 무시 주행 거리 |
 | `initial_search_radius_m` | 2.0 | 초기 인계 위치 기준 접근 반경 |
-| `capable_left_fill_ratio` | 0.70 | CAPABLE bbox 점유율 |
-| `align_target_x` | 0.25 | buoy 정렬 목표 X |
-| `align_target_y` | 0.50 | buoy 정렬 목표 Y |
-| `approach_area_ratio` | 0.20 | APPROACH에서 ALIGN으로 전환할 bbox 면적비 |
+| `align_target_x` | 0.85 | ALIGN에서 계속 추종할 buoy 중심 X |
+| `align_target_y` | 0.25 | ALIGN에서 계속 추종할 buoy 중심 Y |
+| `align_zone_min_x` | 0.50 | 삽입 전이 허용 영역의 최소 X |
+| `align_zone_max_y` | 0.50 | 삽입 전이 허용 영역의 최대 Y |
+| `approach_area_ratio` | 0.005 | APPROACH에서 ALIGN으로 전환할 bbox 면적비 |
 | `approach_forward_max_pwm` | 1700 | 멀리 있는 buoy 접근 최대 PWM |
-| `approach_forward_pwm` | 1560 | 가까운 buoy 접근 및 ALIGN 저속 PWM |
-| `align_stable_sec` | 0.7 | 삽입 전 deadband 안정 유지 시간 |
+| `approach_forward_pwm` | 1560 | 가까운 buoy 접근 최소 PWM |
+| `align_stable_sec` | 0.7 | 삽입 전 허용 영역 유지 시간 |
 | `reacquire_yaw_pwm` | 1470 | 부표 유실 뒤 재탐색 yaw PWM |
 | `reacquire_yaw_duration_sec` | 0.5 | 위 yaw를 유지하는 시간 |
 | `reacquire_timeout_sec` | 1.0 | 재검출 실패 시 레인 진행/복귀까지의 시간 |
-| `target_confirm_hits` | 4 | 연속 검출 횟수 |
-| `target_confirm_sec` | 0.3 | 연속 검출 후 유지 시간 |
+| `target_confirm_hits` | 3 | 타깃 확정에 필요한 연속 검출 횟수 |
+| `target_confirm_sec` | 0.2 | 연속 검출 후 추가 유지 시간 |
+| `buoy_confidence_similar_delta` | 0.05 | 두 confidence를 비슷하다고 보는 차이 |
+| `buoy_same_target_center_ratio` | 0.12 | 같은 타깃으로 보는 축별 중심 거리 비율 |
 | `lane_forward_pwm` | 1700 | 레인/waypoint 전진 PWM |
-| `insert_fork_pwm` | 1560 | 일반 삽입 PWM |
-| `insert_fork_hard_pwm` | 1620 | 강한 삽입 PWM |
-| `go_back_pwm` | 1420 | 후퇴 PWM |
+| `insert_fork_pwm` | 1700 | 강한 전진 삽입 PWM |
+| `insert_fork_duration_sec` | 1.2 | 강한 전진 삽입 시간 |
+| `insert_fork_hard_pwm` | 1700 | 재시도 강한 삽입 PWM |
+| `insert_fork_hard_duration_sec` | 1.2 | 재시도 강한 삽입 시간 |
+| `go_back_pwm` | 1300 | 강한 후퇴 PWM |
+| `go_back_duration_sec` | 1.2 | 강한 후퇴 시간 |
 | `odometry_timeout_sec` | 0.5 | odom FAILSAFE 시간 |
 | `depth_timeout_sec` | 1.0 | 수심 FAILSAFE 시간 |
 | `max_depth_m` | 10.5 | 최대 허용 수심 |

@@ -182,17 +182,19 @@ private:
   {
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 20.0);
     odometry_timeout_sec_ = declare_parameter<double>("odometry_timeout_sec", 0.5);
-    detection_timeout_sec_ = declare_parameter<double>("detection_timeout_sec", 0.7);
+    detection_timeout_sec_ = declare_parameter<double>("detection_timeout_sec", 1.0);
     depth_timeout_sec_ = declare_parameter<double>("depth_timeout_sec", 1.0);
     depth_pose_scale_ = declare_parameter<double>("depth_pose_scale", -1.0);
     depth_pose_offset_m_ = declare_parameter<double>("depth_pose_offset_m", 0.0);
     max_depth_m_ = declare_parameter<double>("max_depth_m", 10.5);
 
     buoy_class_id_ = declare_parameter<int>("buoy_class_id", 0);
-    target_confirm_hits_ = declare_parameter<int>("target_confirm_hits", 4);
-    target_confirm_sec_ = declare_parameter<double>("target_confirm_sec", 0.3);
-    same_target_center_ratio_ =
-      declare_parameter<double>("same_target_center_ratio", 0.12);
+    target_confirm_hits_ = declare_parameter<int>("target_confirm_hits", 3);
+    target_confirm_sec_ = declare_parameter<double>("target_confirm_sec", 0.2);
+    buoy_confidence_similar_delta_ =
+      declare_parameter<double>("buoy_confidence_similar_delta", 0.05);
+    buoy_same_target_center_ratio_ =
+      declare_parameter<double>("buoy_same_target_center_ratio", 0.12);
     lpf_tau_sec_ = declare_parameter<double>("lpf_tau_sec", 0.3);
 
     initial_search_radius_m_ =
@@ -208,23 +210,23 @@ private:
       declare_parameter<double>("reacquire_yaw_duration_sec", 0.5);
     reacquire_timeout_sec_ = declare_parameter<double>("reacquire_timeout_sec", 1.0);
 
-    align_target_x_ = declare_parameter<double>("align_target_x", 0.25);
-    align_target_y_ = declare_parameter<double>("align_target_y", 0.50);
-    align_deadband_x_ = declare_parameter<double>("align_deadband_x", 0.08);
-    align_deadband_y_ = declare_parameter<double>("align_deadband_y", 0.10);
-    capable_left_fill_ratio_ =
-      declare_parameter<double>("capable_left_fill_ratio", 0.70);
+    // 테스트 패키지와 동일하게 오른쪽 위 목표점을 계속 추종하되,
+    // 더 넓은 오른쪽 위 영역을 삽입 전이 조건으로 사용한다.
+    align_target_x_ = declare_parameter<double>("align_target_x", 0.85);
+    align_target_y_ = declare_parameter<double>("align_target_y", 0.25);
+    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.50);
+    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.50);
     align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
-    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.20);
+    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.005);
 
-    insert_fork_pwm_ = declare_parameter<int>("insert_fork_pwm", 1560);
+    insert_fork_pwm_ = declare_parameter<int>("insert_fork_pwm", 1700);
     insert_fork_duration_sec_ =
-      declare_parameter<double>("insert_fork_duration_sec", 0.8);
-    insert_fork_hard_pwm_ = declare_parameter<int>("insert_fork_hard_pwm", 1620);
+      declare_parameter<double>("insert_fork_duration_sec", 1.2);
+    insert_fork_hard_pwm_ = declare_parameter<int>("insert_fork_hard_pwm", 1700);
     insert_fork_hard_duration_sec_ =
-      declare_parameter<double>("insert_fork_hard_duration_sec", 0.8);
-    go_back_pwm_ = declare_parameter<int>("go_back_pwm", 1420);
-    go_back_duration_sec_ = declare_parameter<double>("go_back_duration_sec", 0.5);
+      declare_parameter<double>("insert_fork_hard_duration_sec", 1.2);
+    go_back_pwm_ = declare_parameter<int>("go_back_pwm", 1300);
+    go_back_duration_sec_ = declare_parameter<double>("go_back_duration_sec", 1.2);
     verify_clear_sec_ = declare_parameter<double>("verify_clear_sec", 1.0);
     verify_timeout_sec_ = declare_parameter<double>("verify_timeout_sec", 3.0);
   }
@@ -306,16 +308,24 @@ private:
     }
     if (
       target_confirm_hits_ < 1 || target_confirm_sec_ < 0.0 ||
-      lpf_tau_sec_ < 0.0 || initial_search_radius_m_ <= 0.0)
+      lpf_tau_sec_ < 0.0 || initial_search_radius_m_ <= 0.0 ||
+      !std::isfinite(buoy_confidence_similar_delta_) ||
+      buoy_confidence_similar_delta_ < 0.0 || buoy_confidence_similar_delta_ > 1.0 ||
+      !std::isfinite(buoy_same_target_center_ratio_) ||
+      buoy_same_target_center_ratio_ < 0.0 || buoy_same_target_center_ratio_ > 1.0)
     {
       throw std::invalid_argument("detection and initial search parameters are invalid");
     }
     if (
+      !std::isfinite(align_target_x_) || !std::isfinite(align_target_y_) ||
       align_target_x_ < 0.0 || align_target_x_ > 1.0 ||
       align_target_y_ < 0.0 || align_target_y_ > 1.0 ||
-      capable_left_fill_ratio_ <= 0.0 || capable_left_fill_ratio_ > 1.0)
+      !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
+      align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
+      align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0 ||
+      !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0)
     {
-      throw std::invalid_argument("image alignment parameters must be normalized");
+      throw std::invalid_argument("invalid alignment target, zone, or stable time");
     }
     if (
       approach_vision_throttle_weight_ < 0.0 ||
@@ -333,7 +343,7 @@ private:
     if (
       reacquire_yaw_duration_sec_ < 0.0 ||
       reacquire_timeout_sec_ < reacquire_yaw_duration_sec_ ||
-      align_stable_sec_ < 0.0 || approach_area_ratio_ <= 0.0 ||
+      approach_area_ratio_ <= 0.0 ||
       approach_area_ratio_ > 1.0 || approach_forward_max_pwm_ < approach_forward_pwm_)
     {
       throw std::invalid_argument("approach and reacquire parameters are invalid");
@@ -509,54 +519,87 @@ private:
       return;
     }
     const Detection raw_detection = *best_buoy;
-    update_buoy(raw_detection);
+    accept_buoy_detection(raw_detection);
     if (state_ == State::INITIAL_SCAN_360 && have_odometry_) {
       consider_scan_candidate(raw_detection);
     }
   }
 
-  // 상자 면적과 신뢰도를 비교해 더 가까운 부표 후보를 판단한다.
+  // bbox 면적을 최우선으로 하고, 면적이 같을 때 confidence와 오른쪽 순으로 판단한다.
   bool is_better_buoy(const Detection & candidate, const Detection & current) const
   {
-    const double candidate_area =
-      static_cast<double>(candidate.width) * static_cast<double>(candidate.height);
-    const double current_area =
-      static_cast<double>(current.width) * static_cast<double>(current.height);
-    if (std::abs(candidate_area - current_area) > 0.15 * std::max(candidate_area, current_area)) {
+    const double candidate_area = std::max(
+      0.0, static_cast<double>(candidate.width) * static_cast<double>(candidate.height));
+    const double current_area = std::max(
+      0.0, static_cast<double>(current.width) * static_cast<double>(current.height));
+    if (candidate_area != current_area) {
       return candidate_area > current_area;
     }
-    return candidate.confidence > current.confidence;
+    if (
+      std::abs(candidate.confidence - current.confidence) >
+      buoy_confidence_similar_delta_)
+    {
+      return candidate.confidence > current.confidence;
+    }
+    return candidate.center_x > current.center_x;
   }
 
-  // 연속 검출 횟수와 필터를 적용해 현재 부표 정보를 갱신한다.
-  void update_buoy(Detection incoming)
+  // 탐색 중에는 더 좋은 후보로 교체하고, 접근 이후에는 선택한 타깃만 유지한다.
+  void accept_buoy_detection(Detection incoming)
   {
-    const auto received_at = now();
-    int hits = 1;
-    if (recent(buoy_) && same_target(incoming, *buoy_)) {
-      hits = buoy_->consecutive_hits + 1;
-      const double dt = (received_at - buoy_->received_at).seconds();
-      incoming.center_x =
-        static_cast<float>(low_pass(buoy_->center_x, incoming.center_x, dt));
-      incoming.center_y =
-        static_cast<float>(low_pass(buoy_->center_y, incoming.center_y, dt));
-      incoming.width = static_cast<float>(low_pass(buoy_->width, incoming.width, dt));
-      incoming.height =
-        static_cast<float>(low_pass(buoy_->height, incoming.height, dt));
+    const bool selecting =
+      state_ == State::IDLE || state_ == State::TARGET_CONFIRM ||
+      state_ == State::INITIAL_SCAN_360 ||
+      state_ == State::LANE_FOLLOWING_WITH_SEARCH ||
+      state_ == State::TARGET_HOLD || state_ == State::REACQUIRE_BUOY;
+
+    if (!recent(buoy_)) {
+      buoy_ = incoming;
+      target_confirm_started_at_.reset();
+      target_hold_confirm_started_at_.reset();
+      detection_confirm_started_at_.reset();
+      return;
     }
-    incoming.received_at = received_at;
-    incoming.consecutive_hits = hits;
-    buoy_ = incoming;
+    if (same_buoy_target(incoming, *buoy_)) {
+      update_detection_slot(incoming);
+      return;
+    }
+    if (selecting && is_better_buoy(incoming, *buoy_)) {
+      buoy_ = incoming;
+      target_confirm_started_at_.reset();
+      target_hold_confirm_started_at_.reset();
+      detection_confirm_started_at_.reset();
+    }
   }
 
   // 두 검출 중심의 차이로 같은 부표인지 판단한다.
-  bool same_target(const Detection & a, const Detection & b) const
+  bool same_buoy_target(const Detection & a, const Detection & b) const
   {
     const double width = std::max(a.image_width, b.image_width);
     const double height = std::max(a.image_height, b.image_height);
+    if (width <= 0.0 || height <= 0.0) {
+      return false;
+    }
     return
-      std::abs(a.center_x - b.center_x) / width <= same_target_center_ratio_ &&
-      std::abs(a.center_y - b.center_y) / height <= same_target_center_ratio_;
+      std::abs(a.center_x - b.center_x) / width <= buoy_same_target_center_ratio_ &&
+      std::abs(a.center_y - b.center_y) / height <= buoy_same_target_center_ratio_;
+  }
+
+  // 같은 타깃의 연속 검출 횟수와 저역통과필터 값을 갱신한다.
+  void update_detection_slot(Detection incoming)
+  {
+    const auto received_at = now();
+    const double dt = (received_at - buoy_->received_at).seconds();
+    incoming.center_x =
+      static_cast<float>(low_pass(buoy_->center_x, incoming.center_x, dt));
+    incoming.center_y =
+      static_cast<float>(low_pass(buoy_->center_y, incoming.center_y, dt));
+    incoming.width = static_cast<float>(low_pass(buoy_->width, incoming.width, dt));
+    incoming.height =
+      static_cast<float>(low_pass(buoy_->height, incoming.height, dt));
+    incoming.received_at = received_at;
+    incoming.consecutive_hits = buoy_->consecutive_hits + 1;
+    buoy_ = incoming;
   }
 
   // 이전 값과 새 값을 시간 간격에 따라 부드럽게 결합한다.
@@ -569,15 +612,11 @@ private:
     return alpha * sample + (1.0 - alpha) * previous;
   }
 
-  // 회전 탐색 중 가장 큰 부표 후보와 관측 방향을 저장한다.
+  // 회전 탐색 중 공통 선택 우선순위에 가장 잘 맞는 후보와 관측 방향을 저장한다.
   void consider_scan_candidate(const Detection & detection)
   {
     const double area = detection_area_ratio(detection);
-    if (
-      !scan_candidate_ || area > scan_candidate_->area_ratio ||
-      (std::abs(area - scan_candidate_->area_ratio) <= 1.0e-6 &&
-      detection.confidence > scan_candidate_->detection.confidence))
-    {
+    if (!scan_candidate_ || is_better_buoy(detection, scan_candidate_->detection)) {
       scan_candidate_ = ScanCandidate{detection, current_yaw_rad_, area};
     }
   }
@@ -896,7 +935,7 @@ private:
     }
   }
 
-  // buoy를 포크 기준의 왼쪽 화면 목표점에 정렬하고, 충분히 가까울 때 삽입한다.
+  // buoy 중심을 오른쪽 위 목표점으로 계속 제어하고, 넓은 허용 영역에서 삽입한다.
   void run_align_buoy(std::array<uint16_t, 18> & channels)
   {
     if (!recent(buoy_)) {
@@ -909,16 +948,15 @@ private:
       return;
     }
 
-    const auto [error_x, error_y] =
-      normalized_error(*buoy_, align_target_x_, align_target_y_);
-    const bool aligned =
-      std::abs(error_x) <= align_deadband_x_ &&
-      std::abs(error_y) <= align_deadband_y_;
-    const bool capable = left_half_fill_ratio(*buoy_) >= capable_left_fill_ratio_;
+    const double x = buoy_->center_x / buoy_->image_width;
+    const double y = buoy_->center_y / buoy_->image_height;
+    const bool in_alignment_zone =
+      x >= align_zone_min_x_ && y <= align_zone_max_y_;
+
+    // 허용 영역 안에서도 목표점 (0.85, 0.25)을 향한 보정을 계속한다.
     apply_visual_tracking(
-      channels, *buoy_, capable ? neutral_pwm_ : approach_forward_pwm_,
-      align_target_x_, align_target_y_);
-    if (!capable || !aligned) {
+      channels, *buoy_, neutral_pwm_, align_target_x_, align_target_y_);
+    if (!in_alignment_zone) {
       align_stable_started_at_.reset();
       return;
     }
@@ -927,7 +965,7 @@ private:
       return;
     }
     if ((now() - *align_stable_started_at_).seconds() >= align_stable_sec_) {
-      transition_to(State::INSERT_FORK, "aligned buoy occupies capable left-half area");
+      transition_to(State::INSERT_FORK, "buoy remained in alignment zone");
     }
   }
 
@@ -1229,23 +1267,6 @@ private:
       std::clamp(2.0 * (y - target_y), -1.0, 1.0)};
   }
 
-  // 부표 상자가 왼쪽 화면 절반에서 차지하는 면적 비율을 계산한다.
-  double left_half_fill_ratio(const Detection & detection) const
-  {
-    const double image_width = detection.image_width;
-    const double image_height = detection.image_height;
-    const double box_x_min = detection.center_x - 0.5 * detection.width;
-    const double box_x_max = detection.center_x + 0.5 * detection.width;
-    const double box_y_min = detection.center_y - 0.5 * detection.height;
-    const double box_y_max = detection.center_y + 0.5 * detection.height;
-    const double intersection_width =
-      std::max(0.0, std::min(box_x_max, 0.5 * image_width) - std::max(box_x_min, 0.0));
-    const double intersection_height =
-      std::max(0.0, std::min(box_y_max, image_height) - std::max(box_y_min, 0.0));
-    return (intersection_width * intersection_height) /
-           (0.5 * image_width * image_height);
-  }
-
   // 부표 상자가 전체 화면에서 차지하는 면적 비율을 계산한다.
   double detection_area_ratio(const Detection & detection) const
   {
@@ -1498,15 +1519,16 @@ private:
 
   double control_rate_hz_{20.0};
   double odometry_timeout_sec_{0.5};
-  double detection_timeout_sec_{0.7};
+  double detection_timeout_sec_{1.0};
   double depth_timeout_sec_{1.0};
   double depth_pose_scale_{-1.0};
   double depth_pose_offset_m_{0.0};
   double max_depth_m_{10.5};
   int buoy_class_id_{0};
-  int target_confirm_hits_{4};
-  double target_confirm_sec_{0.3};
-  double same_target_center_ratio_{0.12};
+  int target_confirm_hits_{3};
+  double target_confirm_sec_{0.2};
+  double buoy_confidence_similar_delta_{0.05};
+  double buoy_same_target_center_ratio_{0.12};
   double lpf_tau_sec_{0.3};
   double initial_search_radius_m_{2.0};
   int initial_scan_yaw_pwm_{1600};
@@ -1515,19 +1537,18 @@ private:
   int reacquire_yaw_pwm_{1470};
   double reacquire_yaw_duration_sec_{0.5};
   double reacquire_timeout_sec_{1.0};
-  double align_target_x_{0.25};
-  double align_target_y_{0.50};
-  double align_deadband_x_{0.08};
-  double align_deadband_y_{0.10};
-  double capable_left_fill_ratio_{0.70};
+  double align_target_x_{0.85};
+  double align_target_y_{0.25};
+  double align_zone_min_x_{0.50};
+  double align_zone_max_y_{0.50};
   double align_stable_sec_{0.7};
-  double approach_area_ratio_{0.20};
-  int insert_fork_pwm_{1560};
-  double insert_fork_duration_sec_{0.8};
-  int insert_fork_hard_pwm_{1620};
-  double insert_fork_hard_duration_sec_{0.8};
-  int go_back_pwm_{1420};
-  double go_back_duration_sec_{0.5};
+  double approach_area_ratio_{0.005};
+  int insert_fork_pwm_{1700};
+  double insert_fork_duration_sec_{1.2};
+  int insert_fork_hard_pwm_{1700};
+  double insert_fork_hard_duration_sec_{1.2};
+  int go_back_pwm_{1300};
+  double go_back_duration_sec_{1.2};
   double verify_clear_sec_{1.0};
   double verify_timeout_sec_{3.0};
 
