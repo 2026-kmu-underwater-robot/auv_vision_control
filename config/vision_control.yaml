@@ -1,0 +1,107 @@
+yolo_buoy_detector:
+  ros__parameters:
+    image_topic: /imx219/camera0/image_raw/compressed
+    bbox_topic: /vision/buoy_bbox
+    model_path: ""
+    target_class_id: 0
+    target_class_name: ""
+    confidence_threshold: 0.35
+    device: auto
+    imgsz: 640
+    show_preview: false
+    preview_window_name: YOLO Buoy Detection
+    publish_per_class: false
+    webrtc_enabled: true
+    webrtc_bind_address: 0.0.0.0
+    webrtc_port: 8090
+    webrtc_bitrate: 2000000
+    webrtc_iframe_interval: 10
+    webrtc_max_fps: 30.0
+    area_similar_ratio: 0.15
+    confidence_similar_delta: 0.05
+
+lane_vision_controller_node:
+  ros__parameters:
+    bbox_topic: /vision/buoy_bbox
+    depth_topic: /auv/depth
+    depth_pose_topic: /depth/pose
+    odometry_topic: /odometry/filtered
+    start_frame_topic: /start_frame
+    vision_search_request_topic: /homing/vision_search_active
+    target_confirmed_topic: /vision/target_confirmed
+    vision_control_granted_topic: /homing/vision_control_granted
+    emergency_stop_topic: /mission/emergency_stop
+    state_topic: /mission/state
+    rc_override_topic: /mavros/rc/override
+    rc_monitor_topic: /mission/rc_command
+
+    arena_length_m: 15.0
+    arena_width_m: 16.0
+    arena_offset_x_m: -0.3
+    arena_offset_y_m: 0.3
+    arena_safety_margin_m: 0.5
+    arena_start_corner: bottom_left
+    lane_search_offset_m: 2.0
+    incapable_skip_distance_m: 2.0
+    waypoint_reach_tolerance_m: 0.15
+
+    control_rate_hz: 20.0
+    odometry_timeout_sec: 0.5
+    detection_timeout_sec: 1.0
+    depth_timeout_sec: 1.0
+    depth_pose_scale: -1.0
+    depth_pose_offset_m: 0.0
+    max_depth_m: 10.5
+
+    buoy_class_id: 0
+    target_confirm_hits: 3
+    target_confirm_sec: 0.2
+    buoy_confidence_similar_delta: 0.05
+    buoy_same_target_center_ratio: 0.12
+    lpf_tau_sec: 0.3
+    initial_search_radius_m: 2.0
+    initial_scan_yaw_pwm: 1560
+    initial_scan_completion_tolerance_rad: 0.15
+    initial_target_reacquire_timeout_sec: 5.0
+    reacquire_yaw_pwm: 1470
+    reacquire_yaw_duration_sec: 0.5
+    reacquire_timeout_sec: 1.0
+
+    approach_target_x: 0.50
+    approach_target_y: 0.30
+    approach_area_ratio: 0.03
+    approach_close_hold_sec: 2.0
+    strong_forward_pwm: 1700
+    strong_forward_duration_sec: 5.0
+    strong_backoff_pwm: 1300
+    strong_backoff_duration_sec: 3.0
+
+    throttle_channel: 3
+    yaw_channel: 4
+    forward_channel: 5
+    neutral_pwm: 1500
+    min_pwm: 1300
+    max_pwm: 1700
+    rc_pwm_span: 400.0
+    lane_forward_pwm: 1700
+    approach_forward_pwm: 1560
+    approach_forward_max_pwm: 1700
+    waypoint_heading_tolerance_rad: 0.1745
+    waypoint_yaw_kp: 1.15
+    waypoint_yaw_ki: 0.15
+    waypoint_yaw_kd: 0.08
+    waypoint_yaw_integral_limit: 2.0
+    max_waypoint_yaw_delta_pwm: 180
+    waypoint_yaw_invert: true
+    vision_yaw_kp_pwm: 100.0
+    max_vision_yaw_delta_pwm: 100
+    max_vision_throttle_delta_pwm: 100
+    vision_yaw_invert: false
+    vertical_positive_is_up: true
+    approach_vision_throttle_weight: 0.4
+    depth_kp_pwm_per_m: 120.0
+    depth_ki_pwm_per_m_sec: 20.0
+    depth_kd_pwm_sec_per_m: 16.0
+    depth_integral_limit_m_sec: 2.0
+    buoyancy_hold_delta_pwm: 40
+    max_depth_delta_pwm: 160

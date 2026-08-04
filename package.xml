@@ -3,9 +3,9 @@
   href="http://download.ros.org/schema/package_format3.xsd"
   schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>auv_lane_vision_control</name>
+  <name>auv_vision_control</name>
   <version>0.1.0</version>
-  <description>Arena-lane coverage and buoy removal controller for an AUV.</description>
+  <description>Arena-lane buoy control with YOLO and H.264 WebRTC transport.</description>
 
   <maintainer email="kim@example.com">kim</maintainer>
   <license>BSD-3-Clause</license>
@@ -20,6 +20,12 @@
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-gi</exec_depend>
+  <exec_depend>python3-websockets</exec_depend>
+  <exec_depend>gstreamer1.0-nice</exec_depend>
+  <exec_depend>auv_imx219_camera</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(auv_lane_vision_control)
+project(auv_vision_control)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -46,8 +46,40 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
-install(DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
+install(PROGRAMS
+  scripts/yolo_buoy_detector.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME yolo_buoy_detector
+)
+
+install(PROGRAMS
+  scripts/ros_image_webrtc_streamer.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME ros_image_webrtc_streamer
+)
+
+install(FILES
+  scripts/yolo_webrtc_transport.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/check_yolo_env.py
+  scripts/setup_laptop_yolo_env.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  launch
+  config
+  models
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(FILES
+  requirements-yolo.txt
+  README.md
+  DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

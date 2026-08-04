@@ -1,4 +1,4 @@
-# AUV Lane Vision Control
+# AUV Vision Control
 
 Hydrophone 제어기로부터 제어권을 인계받은 뒤, 초기 부표를 처리하고 수조 좌표계에
 자동 생성한 레인을 따라가며 남은 부표를 탐색·제거하는 ROS 2 패키지입니다.
@@ -12,7 +12,7 @@ Hydrophone 제어기로부터 제어권을 인계받은 뒤, 초기 부표를 �
 - ROS 2 Humble과 MAVROS가 설치되어 있어야 합니다.
 - `/start_frame`은 `hydrophone_ctrl`의 시작 좌표 규약으로 발행되어야 합니다.
 - `/odometry/filtered`에서 유효한 위치와 yaw를 받을 수 있어야 합니다.
-- 기존 YOLO 검출기가 `/vision/buoy_bbox`에 buoy bbox를 발행해야 합니다.
+- 포함된 YOLO 검출기가 `/vision/buoy_bbox`에 buoy bbox를 발행합니다.
 - 실제 RC 채널 방향과 PWM은 낮은 추력에서 먼저 확인해야 합니다.
 - 이 제어기는 `COMPLETE`에서 자동 부상하지 않고 RC override를 해제합니다.
 
@@ -249,35 +249,48 @@ depth = -pose.position.z
 ## 빌드
 
 ```bash
-cd ~/vision_control
-colcon build \
-  --base-paths auv_lane_vision_control \
-  --packages-select auv_lane_vision_control
+cd ~/auv_ws
+colcon build --packages-select auv_vision_control --symlink-install
 source install/setup.bash
 ```
 
 ## 실행
 
+IMX219 카메라 두 대, 원본 영상 H.264 WebRTC, YOLO 검출 영상 H.264
+WebRTC, 레인 제어기를 기본 config로 함께 실행합니다.
+
 ```bash
-ros2 run auv_lane_vision_control lane_vision_controller_node
+ros2 launch auv_vision_control vision_control.launch.py
 ```
 
-모든 노드 파라미터를 launch argument로 변경할 수 있는 통합 실행:
+기본 포트는 YOLO 검출 영상 `8090`, camera0 원본 `8091`, camera1 원본
+`8092`입니다. 이미 카메라 노드를 따로 실행 중이면 중복 실행을 막기 위해 다음처럼
+카메라 시작만 비활성화합니다.
 
 ```bash
-ros2 launch auv_lane_vision_control lane_vision_controller.launch.py
+ros2 launch auv_vision_control vision_control.launch.py start_imx219:=false
 ```
 
-사용 가능한 전체 launch argument 확인:
+다른 모델이나 config를 사용하려면 launch 인자로 지정합니다.
 
 ```bash
-ros2 launch auv_lane_vision_control lane_vision_controller.launch.py --show-args
+ros2 launch auv_vision_control vision_control.launch.py \
+  model_path:=/absolute/path/to/best.pt \
+  config_file:=/absolute/path/to/vision_control.yaml
 ```
 
-launch 실행 시 파라미터 변경 예:
+카메라와 YOLO 없이 최신 제어기만 실행할 때는 전용 launch를 사용합니다. 모든
+controller 파라미터를 launch argument로 변경할 수 있습니다.
 
 ```bash
-ros2 launch auv_lane_vision_control lane_vision_controller.launch.py \
+ros2 launch auv_vision_control lane_vision_controller.launch.py
+ros2 launch auv_vision_control lane_vision_controller.launch.py --show-args
+```
+
+전용 controller launch의 파라미터 변경 예:
+
+```bash
+ros2 launch auv_vision_control lane_vision_controller.launch.py \
   initial_scan_yaw_pwm:=1560 \
   approach_target_x:=0.50 \
   approach_target_y:=0.30 \
@@ -287,14 +300,16 @@ ros2 launch auv_lane_vision_control lane_vision_controller.launch.py \
   vision_yaw_kp_pwm:=100.0
 ```
 
-파라미터 변경 예:
+YOLO만 실행하거나 카메라 두 대를 H.264로 전송할 수도 있습니다.
 
 ```bash
-ros2 run auv_lane_vision_control lane_vision_controller_node --ros-args \
-  -p lane_search_offset_m:=2.0 \
-  -p max_depth_m:=10.5 \
-  -p buoy_class_id:=0
+ros2 launch auv_vision_control laptop_yolo_detection.launch.py
+ros2 launch auv_vision_control dual_imx219_h264.launch.py
 ```
+
+기본 설정 파일은 `config/vision_control.yaml`입니다. 검출기는
+`target_class_id=0`, `publish_per_class=false`로 설정해 buoy 하나만
+`/vision/buoy_bbox`에 내보냅니다.
 
 상태 확인:
 
@@ -308,7 +323,7 @@ ros2 topic echo /mission/rc_command
 
 - 실제 장비에서 실행하기 전에 `waypoint_yaw_invert`, `vision_yaw_invert`,
   `vertical_positive_is_up` 방향을 확인합니다.
-- 처음에는 낮은 forward/insert PWM으로 시험합니다.
+- 처음에는 낮은 approach/strong-forward PWM으로 시험합니다.
 - `/start_frame`, odom, depth, bbox 수신 상태를 확인한 뒤 제어권을 승인합니다.
 - `FAILSAFE`와 `COMPLETE`에서는 throttle/yaw/forward 채널에
   `CHAN_RELEASE`를 발행합니다.
