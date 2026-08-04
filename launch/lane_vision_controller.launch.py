@@ -123,7 +123,7 @@ def generate_launch_description():
     }
 
     controller = Node(
-        package="auv_lane_vision_control",
+        package="auv_vision_control",
         executable="lane_vision_controller_node",
         name="lane_vision_controller_node",
         output="screen",
