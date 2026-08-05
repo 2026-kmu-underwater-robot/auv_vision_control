@@ -238,7 +238,17 @@ depth = -pose.position.z
 | `target_confirm_sec` | 0.2 | 연속 검출 후 추가 유지 시간 |
 | `buoy_confidence_similar_delta` | 0.05 | 두 confidence를 비슷하다고 보는 차이 |
 | `buoy_same_target_center_ratio` | 0.12 | 같은 타깃으로 보는 축별 중심 거리 비율 |
-| `lane_forward_pwm` | 1700 | 레인/waypoint 전진 PWM |
+| `lane_forward_pwm` | 1650 | LOS 레인 추종/waypoint 최대 전진 PWM |
+| `lane_forward_slow_pwm` | 1532 | LOS 정렬 및 waypoint 감속 최소 전진 PWM |
+| `lane_lookahead_distance_m` | 1.0 | 현재 레인 투영점 앞의 LOS 목표 거리 |
+| `lane_rejoin_cross_track_tolerance_m` | 0.25 | 동적 레인 복귀 완료 횡오차 |
+| `lane_rejoin_heading_tolerance_rad` | 0.2618 | 동적 레인 복귀 완료 헤딩 오차 |
+| `lane_forward_full_heading_rad` | 0.1745 | 최대 레인 전진을 허용하는 헤딩 오차 |
+| `lane_forward_stop_heading_rad` | 0.5236 | 레인 전진을 중단하는 헤딩 오차 |
+| `lane_transfer_forward_pwm` | 1600 | 인접 레인 연결선 추종 최대 전진 PWM |
+| `lane_transfer_slowdown_distance_m` | 0.75 | 다음 레인 시작점 접근 감속 거리 |
+| `lane_transfer_heading_tolerance_rad` | 0.0873 | 레인 간 이동 전후 제자리 정렬 허용 오차 |
+| `lane_transfer_heading_hold_sec` | 0.3 | 정렬 완료 전 헤딩 안정 유지 시간 |
 | `odometry_timeout_sec` | 0.5 | odom FAILSAFE 시간 |
 | `depth_timeout_sec` | 1.0 | 수심 FAILSAFE 시간 |
 | `max_depth_m` | 10.5 | 최대 허용 수심 |

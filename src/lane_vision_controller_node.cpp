@@ -81,6 +81,8 @@ public:
   }
 
 private:
+  static constexpr double YAW_DERIVATIVE_ALPHA = 0.2;
+
   enum class State
   {
     IDLE,
@@ -104,6 +106,13 @@ private:
   {
     INITIAL,
     LANE
+  };
+
+  enum class LaneTransferPhase
+  {
+    ALIGN_TRANSFER,
+    TRACK_TRANSFER,
+    ALIGN_NEW_LANE
   };
 
   struct Detection
@@ -232,19 +241,46 @@ private:
     max_pwm_ = declare_parameter<int>("max_pwm", 1700);
     rc_pwm_span_ = declare_parameter<double>("rc_pwm_span", 400.0);
 
-    lane_forward_pwm_ = declare_parameter<int>("lane_forward_pwm", 1700);
+    lane_forward_pwm_ = declare_parameter<int>("lane_forward_pwm", 1650);
+    lane_forward_slow_pwm_ = declare_parameter<int>("lane_forward_slow_pwm", 1532);
+    lane_lookahead_distance_m_ =
+      declare_parameter<double>("lane_lookahead_distance_m", 1.0);
+    lane_rejoin_cross_track_tolerance_m_ =
+      declare_parameter<double>("lane_rejoin_cross_track_tolerance_m", 0.25);
+    lane_rejoin_heading_tolerance_rad_ =
+      declare_parameter<double>("lane_rejoin_heading_tolerance_rad", 0.2618);
+    lane_forward_full_heading_rad_ =
+      declare_parameter<double>("lane_forward_full_heading_rad", 0.1745);
+    lane_forward_stop_heading_rad_ =
+      declare_parameter<double>("lane_forward_stop_heading_rad", 0.5236);
+    lane_transfer_forward_pwm_ =
+      declare_parameter<int>("lane_transfer_forward_pwm", 1600);
+    lane_transfer_slowdown_distance_m_ =
+      declare_parameter<double>("lane_transfer_slowdown_distance_m", 0.75);
+    lane_transfer_heading_tolerance_rad_ =
+      declare_parameter<double>("lane_transfer_heading_tolerance_rad", 0.0873);
+    lane_transfer_heading_hold_sec_ =
+      declare_parameter<double>("lane_transfer_heading_hold_sec", 0.3);
+    waypoint_slowdown_distance_m_ =
+      declare_parameter<double>("waypoint_slowdown_distance_m", 0.25);
+    waypoint_settle_speed_mps_ =
+      declare_parameter<double>("waypoint_settle_speed_mps", 0.15);
+    waypoint_settle_hold_sec_ =
+      declare_parameter<double>("waypoint_settle_hold_sec", 0.3);
     approach_forward_pwm_ = declare_parameter<int>("approach_forward_pwm", 1560);
     approach_forward_max_pwm_ =
       declare_parameter<int>("approach_forward_max_pwm", 1700);
     waypoint_heading_tolerance_rad_ =
       declare_parameter<double>("waypoint_heading_tolerance_rad", 0.1745);
-    waypoint_yaw_kp_ = declare_parameter<double>("waypoint_yaw_kp", 1.15);
-    waypoint_yaw_ki_ = declare_parameter<double>("waypoint_yaw_ki", 0.15);
-    waypoint_yaw_kd_ = declare_parameter<double>("waypoint_yaw_kd", 0.08);
+    waypoint_heading_release_rad_ =
+      declare_parameter<double>("waypoint_heading_release_rad", 0.3491);
+    waypoint_yaw_kp_ = declare_parameter<double>("waypoint_yaw_kp", 0.8);
+    waypoint_yaw_ki_ = declare_parameter<double>("waypoint_yaw_ki", 0.1);
+    waypoint_yaw_kd_ = declare_parameter<double>("waypoint_yaw_kd", 0.02);
     waypoint_yaw_integral_limit_ =
-      declare_parameter<double>("waypoint_yaw_integral_limit", 2.0);
+      declare_parameter<double>("waypoint_yaw_integral_limit", 0.7);
     max_waypoint_yaw_delta_pwm_ =
-      declare_parameter<int>("max_waypoint_yaw_delta_pwm", 180);
+      declare_parameter<int>("max_waypoint_yaw_delta_pwm", 160);
     waypoint_yaw_invert_ = declare_parameter<bool>("waypoint_yaw_invert", true);
 
     vision_yaw_kp_pwm_ = declare_parameter<double>("vision_yaw_kp_pwm", 100.0);
@@ -320,6 +356,35 @@ private:
       approach_vision_throttle_weight_ > 1.0)
     {
       throw std::invalid_argument("approach_vision_throttle_weight must be in [0, 1]");
+    }
+    if (
+      rc_pwm_span_ <= 0.0 || lane_forward_pwm_ < neutral_pwm_ ||
+      lane_forward_pwm_ > max_pwm_ ||
+      lane_forward_slow_pwm_ < neutral_pwm_ ||
+      lane_forward_slow_pwm_ > lane_forward_pwm_ ||
+      lane_lookahead_distance_m_ <= 0.0 ||
+      lane_rejoin_cross_track_tolerance_m_ <= 0.0 ||
+      lane_rejoin_cross_track_tolerance_m_ > lane_search_offset_m_ ||
+      lane_rejoin_heading_tolerance_rad_ <= 0.0 ||
+      lane_rejoin_heading_tolerance_rad_ > M_PI ||
+      lane_forward_full_heading_rad_ < 0.0 ||
+      lane_forward_stop_heading_rad_ <= lane_forward_full_heading_rad_ ||
+      lane_forward_stop_heading_rad_ > M_PI ||
+      lane_transfer_forward_pwm_ < lane_forward_slow_pwm_ ||
+      lane_transfer_forward_pwm_ > lane_forward_pwm_ ||
+      lane_transfer_slowdown_distance_m_ < waypoint_reach_tolerance_m_ ||
+      lane_transfer_heading_tolerance_rad_ <= 0.0 ||
+      lane_transfer_heading_tolerance_rad_ > M_PI ||
+      lane_transfer_heading_hold_sec_ < 0.0 ||
+      waypoint_slowdown_distance_m_ < waypoint_reach_tolerance_m_ ||
+      waypoint_settle_speed_mps_ < 0.0 || waypoint_settle_hold_sec_ < 0.0 ||
+      waypoint_heading_tolerance_rad_ <= 0.0 ||
+      waypoint_heading_release_rad_ < waypoint_heading_tolerance_rad_ ||
+      waypoint_heading_release_rad_ > M_PI || waypoint_yaw_kp_ < 0.0 ||
+      waypoint_yaw_ki_ < 0.0 || waypoint_yaw_kd_ < 0.0 ||
+      waypoint_yaw_integral_limit_ < 0.0 || max_waypoint_yaw_delta_pwm_ < 0)
+    {
+      throw std::invalid_argument("waypoint motion parameters are invalid");
     }
     if (
       reacquire_yaw_duration_sec_ < 0.0 ||
@@ -426,6 +491,11 @@ private:
 
     current_position_ = arena_transform_.position_from_odom(odom_position);
     current_yaw_rad_ = arena_transform_.yaw_from_odom(odom_yaw);
+    const double vx = msg->twist.twist.linear.x;
+    const double vy = msg->twist.twist.linear.y;
+    if (std::isfinite(vx) && std::isfinite(vy)) {
+      current_horizontal_speed_mps_ = std::hypot(vx, vy);
+    }
     odometry_received_at_ = now();
     have_odometry_ = true;
   }
@@ -674,6 +744,8 @@ private:
     approach_close_started_at_.reset();
     detection_confirm_started_at_.reset();
     ignore_detections_until_progress_m_.reset();
+    lane_transfer_enabled_ = false;
+    lane_transfer_heading_stable_started_at_.reset();
     mission_hold_depth_m_.reset();
     vision_has_control_ = false;
     reset_waypoint_pid();
@@ -991,14 +1063,12 @@ private:
       ignore_detections_until_progress_m_ = std::min(
         lane_length, target_departure_progress_m_ + incapable_skip_distance_m_);
     }
-    return_waypoint_ =
-      lane_planner_->project_to_lane(current_position_, *active_lane_index_);
     reset_waypoint_pid();
     transition_to(State::RETURN_TO_ACTIVE_LANE, reason);
   }
 
   // 현재 위치에서 가장 가까운 미완료 레인 끝점을 다음 시작점으로 선택한다.
-  void select_next_lane(const std::string & reason)
+  void select_next_lane(const std::string & reason, const bool lane_to_lane = false)
   {
     const auto choice =
       lane_planner_->closest_uncompleted_endpoint(current_position_, lane_completed_);
@@ -1013,6 +1083,10 @@ private:
     active_lane_start_ = choice->start;
     active_lane_finish_ = choice->finish;
     waypoint_ = active_lane_start_;
+    lane_transfer_enabled_ = lane_to_lane;
+    lane_transfer_phase_ = LaneTransferPhase::ALIGN_TRANSFER;
+    lane_transfer_start_ = current_position_;
+    lane_transfer_heading_stable_started_at_.reset();
     ignore_detections_until_progress_m_.reset();
     reset_waypoint_pid();
     transition_to(State::MOVE_TO_LANE_START, reason);
@@ -1026,11 +1100,129 @@ private:
   // 선택된 레인 끝점으로 이동한 뒤 레인 주행을 시작한다.
   void run_move_to_lane_start(std::array<uint16_t, 18> & channels)
   {
+    if (lane_transfer_enabled_) {
+      run_lane_transfer(channels);
+      return;
+    }
     if (follow_waypoint(channels, waypoint_, lane_forward_pwm_)) {
       reset_waypoint_pid();
       detection_confirm_started_at_.reset();
       transition_to(State::LANE_FOLLOWING_WITH_SEARCH, "active lane start reached");
     }
+  }
+
+  // 레인 간 이동을 제자리 정렬, 연결선 추종, 새 레인 정렬의 세 단계로 수행한다.
+  void run_lane_transfer(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_mission_depth(channels);
+    const Vec2 transfer_delta = waypoint_ - lane_transfer_start_;
+    const double transfer_length = norm(transfer_delta);
+    if (transfer_length <= 1.0e-9) {
+      lane_transfer_phase_ = LaneTransferPhase::ALIGN_NEW_LANE;
+    }
+    const Vec2 transfer_direction = transfer_length > 1.0e-9 ?
+      transfer_delta * (1.0 / transfer_length) : active_lane_direction();
+    const double transfer_heading = std::atan2(
+      transfer_direction.y, transfer_direction.x);
+
+    if (lane_transfer_phase_ == LaneTransferPhase::ALIGN_TRANSFER) {
+      set_heading_control(channels, transfer_heading);
+      if (lane_transfer_heading_stable(transfer_heading)) {
+        lane_transfer_phase_ = LaneTransferPhase::TRACK_TRANSFER;
+        lane_transfer_heading_stable_started_at_.reset();
+        reset_waypoint_pid();
+        RCLCPP_INFO(get_logger(), "Lane transfer aligned; tracking connector");
+      }
+      return;
+    }
+
+    if (lane_transfer_phase_ == LaneTransferPhase::TRACK_TRANSFER) {
+      const double endpoint_distance = distance(current_position_, waypoint_);
+      if (endpoint_distance <= waypoint_reach_tolerance_m_) {
+        if (current_horizontal_speed_mps_ > waypoint_settle_speed_mps_) {
+          waypoint_settle_started_at_.reset();
+          return;
+        }
+        if (!waypoint_settle_started_at_) {
+          waypoint_settle_started_at_ = now();
+          return;
+        }
+        if (
+          (now() - *waypoint_settle_started_at_).seconds() <
+          waypoint_settle_hold_sec_)
+        {
+          return;
+        }
+        lane_transfer_phase_ = LaneTransferPhase::ALIGN_NEW_LANE;
+        lane_transfer_heading_stable_started_at_.reset();
+        reset_waypoint_pid();
+        RCLCPP_INFO(get_logger(), "Lane transfer endpoint reached; aligning new lane");
+        return;
+      }
+      waypoint_settle_started_at_.reset();
+
+      const double projected_progress = std::clamp(
+        dot(current_position_ - lane_transfer_start_, transfer_direction),
+        0.0, transfer_length);
+      const double target_progress = std::min(
+        transfer_length, projected_progress + lane_lookahead_distance_m_);
+      const Vec2 los_target =
+        lane_transfer_start_ + transfer_direction * target_progress;
+      const Vec2 los_delta = los_target - current_position_;
+      const double desired_yaw = norm(los_delta) > 1.0e-9 ?
+        std::atan2(los_delta.y, los_delta.x) : transfer_heading;
+      const double heading_error = wrap_pi(desired_yaw - current_yaw_rad_);
+      set_heading_control(channels, desired_yaw);
+
+      double distance_scale = 1.0;
+      if (
+        endpoint_distance < lane_transfer_slowdown_distance_m_ &&
+        lane_transfer_slowdown_distance_m_ > waypoint_reach_tolerance_m_)
+      {
+        distance_scale = std::clamp(
+          (endpoint_distance - waypoint_reach_tolerance_m_) /
+          (lane_transfer_slowdown_distance_m_ - waypoint_reach_tolerance_m_),
+          0.0, 1.0);
+      }
+      const int distance_limited_pwm = static_cast<int>(std::lround(
+        lane_forward_slow_pwm_ + distance_scale *
+        static_cast<double>(lane_transfer_forward_pwm_ - lane_forward_slow_pwm_)));
+      set_channel(
+        channels, forward_channel_,
+        forward_pwm_for_heading(std::abs(heading_error), distance_limited_pwm));
+      return;
+    }
+
+    const Vec2 lane_direction = active_lane_direction();
+    const double lane_heading = std::atan2(lane_direction.y, lane_direction.x);
+    set_heading_control(channels, lane_heading);
+    if (lane_transfer_heading_stable(lane_heading)) {
+      lane_transfer_enabled_ = false;
+      lane_transfer_heading_stable_started_at_.reset();
+      reset_waypoint_pid();
+      detection_confirm_started_at_.reset();
+      transition_to(
+        State::LANE_FOLLOWING_WITH_SEARCH,
+        "lane transfer complete and new lane aligned");
+    }
+  }
+
+  // 지정 방향 오차가 허용 범위 안에서 설정 시간 유지되었는지 확인한다.
+  bool lane_transfer_heading_stable(const double desired_yaw)
+  {
+    const double error = std::abs(wrap_pi(desired_yaw - current_yaw_rad_));
+    if (error > lane_transfer_heading_tolerance_rad_) {
+      lane_transfer_heading_stable_started_at_.reset();
+      return false;
+    }
+    if (!lane_transfer_heading_stable_started_at_) {
+      lane_transfer_heading_stable_started_at_ = now();
+      return lane_transfer_heading_hold_sec_ <= 0.0;
+    }
+    return
+      (now() - *lane_transfer_heading_stable_started_at_).seconds() >=
+      lane_transfer_heading_hold_sec_;
   }
 
   // 활성 레인의 끝점을 향해 주행하면서 부표를 계속 확인한다.
@@ -1040,14 +1232,19 @@ private:
       transition_to(State::FAILSAFE, "lane following without an active lane");
       return;
     }
-    if (distance(current_position_, active_lane_finish_) <= waypoint_reach_tolerance_m_) {
+    const double endpoint_distance = distance(current_position_, active_lane_finish_);
+    if (
+      endpoint_distance <= lane_lookahead_distance_m_ &&
+      follow_waypoint(channels, active_lane_finish_, lane_forward_pwm_))
+    {
       lane_completed_[*active_lane_index_] = true;
       active_lane_index_.reset();
-      select_next_lane("active lane completed");
+      select_next_lane("active lane completed", true);
       return;
     }
-
-    follow_waypoint(channels, active_lane_finish_, lane_forward_pwm_);
+    if (endpoint_distance > lane_lookahead_distance_m_) {
+      apply_active_lane_los(channels);
+    }
 
     const double progress = active_lane_progress();
     if (
@@ -1077,21 +1274,83 @@ private:
     }
   }
 
-  // 부표 작업 후 활성 레인의 가장 가까운 지점으로 복귀한다.
+  // 부표 작업 후 매 주기 갱신되는 LOS 목표로 활성 레인에 부드럽게 합류한다.
   void run_return_to_active_lane(std::array<uint16_t, 18> & channels)
   {
     if (!active_lane_index_) {
       transition_to(State::FAILSAFE, "return requested without an active lane");
       return;
     }
-    if (follow_waypoint(channels, return_waypoint_, lane_forward_pwm_)) {
-      reset_waypoint_pid();
+    apply_active_lane_los(channels);
+    const double cross_track = lane_planner_->cross_track_distance(
+      current_position_, *active_lane_index_);
+    const Vec2 lane_direction = active_lane_direction();
+    const double lane_heading = std::atan2(lane_direction.y, lane_direction.x);
+    const double lane_heading_error = wrap_pi(lane_heading - current_yaw_rad_);
+    if (
+      cross_track <= lane_rejoin_cross_track_tolerance_m_ &&
+      std::abs(lane_heading_error) <= lane_rejoin_heading_tolerance_rad_)
+    {
       buoy_.reset();
       detection_confirm_started_at_.reset();
       transition_to(
         State::LANE_FOLLOWING_WITH_SEARCH,
-        "nearest point on the active lane reached");
+        "active lane dynamically reacquired");
     }
+  }
+
+  // 현재 레인 투영점에서 진행 방향 앞쪽의 동적 LOS 목표를 계산한다.
+  Vec2 active_lane_lookahead_target() const
+  {
+    const double lane_length = lane_planner_->lane_length(*active_lane_index_);
+    const double target_progress = std::min(
+      lane_length, active_lane_progress() + lane_lookahead_distance_m_);
+    return active_lane_start_ + active_lane_direction() * target_progress;
+  }
+
+  // 활성 레인의 시작점에서 종점으로 향하는 단위 방향 벡터를 반환한다.
+  Vec2 active_lane_direction() const
+  {
+    const Vec2 delta = active_lane_finish_ - active_lane_start_;
+    const double length = norm(delta);
+    return length > 1.0e-9 ? delta * (1.0 / length) : Vec2{};
+  }
+
+  // 헤딩 오차가 커질수록 전진 출력을 낮추고 정지 각도 이상에서는 중립을 반환한다.
+  int forward_pwm_for_heading(
+    const double absolute_heading_error, const int maximum_forward_pwm) const
+  {
+    if (absolute_heading_error >= lane_forward_stop_heading_rad_) {
+      return neutral_pwm_;
+    }
+    if (absolute_heading_error <= lane_forward_full_heading_rad_) {
+      return maximum_forward_pwm;
+    }
+    const double scale = std::clamp(
+      (lane_forward_stop_heading_rad_ - absolute_heading_error) /
+      (lane_forward_stop_heading_rad_ - lane_forward_full_heading_rad_),
+      0.0, 1.0);
+    return static_cast<int>(std::lround(
+      lane_forward_slow_pwm_ +
+      scale * static_cast<double>(maximum_forward_pwm - lane_forward_slow_pwm_)));
+  }
+
+  // 고정 waypoint 대신 현재 위치에서 계속 갱신되는 LOS 목표로 레인을 추종한다.
+  void apply_active_lane_los(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_mission_depth(channels);
+    const Vec2 target = active_lane_lookahead_target();
+    const Vec2 delta = target - current_position_;
+    const Vec2 lane_direction = active_lane_direction();
+    const double desired_yaw = norm(delta) > 1.0e-9 ?
+      std::atan2(delta.y, delta.x) :
+      std::atan2(lane_direction.y, lane_direction.x);
+    const double heading_error = wrap_pi(desired_yaw - current_yaw_rad_);
+    set_heading_control(channels, desired_yaw);
+    set_channel(
+      channels, forward_channel_,
+      forward_pwm_for_heading(std::abs(heading_error), lane_forward_pwm_));
   }
 
   // 목표 위치를 향해 방향을 맞추고 허용 오차 안에서 전진한다.
@@ -1101,16 +1360,48 @@ private:
     set_neutral_control(channels);
     hold_mission_depth(channels);
     const Vec2 delta = target - current_position_;
-    if (norm(delta) <= waypoint_reach_tolerance_m_) {
-      reset_waypoint_pid();
-      return true;
+    const double waypoint_distance = norm(delta);
+    if (waypoint_distance <= waypoint_reach_tolerance_m_) {
+      if (current_horizontal_speed_mps_ > waypoint_settle_speed_mps_) {
+        waypoint_settle_started_at_.reset();
+        return false;
+      }
+      if (!waypoint_settle_started_at_) {
+        waypoint_settle_started_at_ = now();
+        return waypoint_settle_hold_sec_ <= 0.0;
+      }
+      return (now() - *waypoint_settle_started_at_).seconds() >= waypoint_settle_hold_sec_;
     }
+    waypoint_settle_started_at_.reset();
 
     const double desired_yaw = std::atan2(delta.y, delta.x);
     const double yaw_error = wrap_pi(desired_yaw - current_yaw_rad_);
     set_heading_control(channels, desired_yaw);
-    if (std::abs(yaw_error) <= waypoint_heading_tolerance_rad_) {
-      set_channel(channels, forward_channel_, forward_pwm);
+    if (!waypoint_heading_aligned_ &&
+      std::abs(yaw_error) <= waypoint_heading_tolerance_rad_)
+    {
+      waypoint_heading_aligned_ = true;
+    }
+    if (waypoint_heading_aligned_ &&
+      std::abs(yaw_error) >= waypoint_heading_release_rad_)
+    {
+      waypoint_heading_aligned_ = false;
+    }
+    if (waypoint_heading_aligned_) {
+      int commanded_forward_pwm = forward_pwm;
+      if (
+        waypoint_distance < waypoint_slowdown_distance_m_ &&
+        waypoint_slowdown_distance_m_ > waypoint_reach_tolerance_m_)
+      {
+        const double scale = std::clamp(
+          (waypoint_distance - waypoint_reach_tolerance_m_) /
+          (waypoint_slowdown_distance_m_ - waypoint_reach_tolerance_m_),
+          0.0, 1.0);
+        commanded_forward_pwm = static_cast<int>(std::lround(
+          lane_forward_slow_pwm_ +
+          scale * static_cast<double>(forward_pwm - lane_forward_slow_pwm_)));
+      }
+      set_channel(channels, forward_channel_, commanded_forward_pwm);
     }
     return false;
   }
@@ -1122,25 +1413,36 @@ private:
     const auto current_time = now();
     const double error = wrap_pi(desired_yaw - current_yaw_rad_);
     double dt = 0.0;
-    double derivative = 0.0;
     if (waypoint_pid_initialized_) {
       dt = std::clamp(
         (current_time - waypoint_pid_time_).seconds(), 0.0, 0.2);
       if (dt > 1.0e-6) {
-        derivative = (error - waypoint_previous_error_) / dt;
+        const double raw_derivative = wrap_pi(error - waypoint_previous_error_) / dt;
+        waypoint_error_derivative_ =
+          (1.0 - YAW_DERIVATIVE_ALPHA) * waypoint_error_derivative_ +
+          YAW_DERIVATIVE_ALPHA * raw_derivative;
       }
     }
-    waypoint_integral_ = std::clamp(
+    const double candidate_integral = std::clamp(
       waypoint_integral_ + error * dt,
       -waypoint_yaw_integral_limit_, waypoint_yaw_integral_limit_);
     waypoint_pid_time_ = current_time;
     waypoint_previous_error_ = error;
     waypoint_pid_initialized_ = true;
 
+    const double candidate_command =
+      waypoint_yaw_kp_ * error +
+      waypoint_yaw_ki_ * candidate_integral +
+      waypoint_yaw_kd_ * waypoint_error_derivative_;
+    const double yaw_limit =
+      static_cast<double>(max_waypoint_yaw_delta_pwm_) / rc_pwm_span_;
+    if (std::abs(candidate_command) <= yaw_limit || candidate_command * error < 0.0) {
+      waypoint_integral_ = candidate_integral;
+    }
     double command =
       waypoint_yaw_kp_ * error +
       waypoint_yaw_ki_ * waypoint_integral_ +
-      waypoint_yaw_kd_ * derivative;
+      waypoint_yaw_kd_ * waypoint_error_derivative_;
     if (waypoint_yaw_invert_) {
       command = -command;
     }
@@ -1404,8 +1706,11 @@ private:
   void reset_waypoint_pid()
   {
     waypoint_pid_initialized_ = false;
+    waypoint_heading_aligned_ = false;
     waypoint_integral_ = 0.0;
     waypoint_previous_error_ = 0.0;
+    waypoint_error_derivative_ = 0.0;
+    waypoint_settle_started_at_.reset();
   }
 
   // 수심 유지에 사용하는 제어 누적값을 초기화한다.
@@ -1475,15 +1780,29 @@ private:
   int min_pwm_{1300};
   int max_pwm_{1700};
   double rc_pwm_span_{400.0};
-  int lane_forward_pwm_{1700};
+  int lane_forward_pwm_{1650};
+  int lane_forward_slow_pwm_{1532};
+  double lane_lookahead_distance_m_{1.0};
+  double lane_rejoin_cross_track_tolerance_m_{0.25};
+  double lane_rejoin_heading_tolerance_rad_{0.2618};
+  double lane_forward_full_heading_rad_{0.1745};
+  double lane_forward_stop_heading_rad_{0.5236};
+  int lane_transfer_forward_pwm_{1600};
+  double lane_transfer_slowdown_distance_m_{0.75};
+  double lane_transfer_heading_tolerance_rad_{0.0873};
+  double lane_transfer_heading_hold_sec_{0.3};
+  double waypoint_slowdown_distance_m_{0.25};
+  double waypoint_settle_speed_mps_{0.15};
+  double waypoint_settle_hold_sec_{0.3};
   int approach_forward_pwm_{1560};
   int approach_forward_max_pwm_{1700};
   double waypoint_heading_tolerance_rad_{0.1745};
-  double waypoint_yaw_kp_{1.15};
-  double waypoint_yaw_ki_{0.15};
-  double waypoint_yaw_kd_{0.08};
-  double waypoint_yaw_integral_limit_{2.0};
-  int max_waypoint_yaw_delta_pwm_{180};
+  double waypoint_heading_release_rad_{0.3491};
+  double waypoint_yaw_kp_{0.8};
+  double waypoint_yaw_ki_{0.1};
+  double waypoint_yaw_kd_{0.02};
+  double waypoint_yaw_integral_limit_{0.7};
+  int max_waypoint_yaw_delta_pwm_{160};
   bool waypoint_yaw_invert_{true};
   double vision_yaw_kp_pwm_{100.0};
   int max_vision_yaw_delta_pwm_{100};
@@ -1507,6 +1826,7 @@ private:
   bool have_odometry_{false};
   Vec2 current_position_{};
   double current_yaw_rad_{0.0};
+  double current_horizontal_speed_mps_{0.0};
   rclcpp::Time odometry_received_at_{0, 0, RCL_ROS_TIME};
   std::optional<DepthSample> pose_depth_;
   std::optional<DepthSample> scalar_depth_;
@@ -1529,13 +1849,19 @@ private:
   Vec2 active_lane_start_{};
   Vec2 active_lane_finish_{};
   Vec2 waypoint_{};
-  Vec2 return_waypoint_{};
+  bool lane_transfer_enabled_{false};
+  LaneTransferPhase lane_transfer_phase_{LaneTransferPhase::ALIGN_TRANSFER};
+  Vec2 lane_transfer_start_{};
+  std::optional<rclcpp::Time> lane_transfer_heading_stable_started_at_;
   double target_departure_progress_m_{0.0};
   std::optional<double> ignore_detections_until_progress_m_;
 
   bool waypoint_pid_initialized_{false};
+  bool waypoint_heading_aligned_{false};
   double waypoint_integral_{0.0};
   double waypoint_previous_error_{0.0};
+  double waypoint_error_derivative_{0.0};
+  std::optional<rclcpp::Time> waypoint_settle_started_at_;
   rclcpp::Time waypoint_pid_time_{0, 0, RCL_ROS_TIME};
   bool depth_pid_initialized_{false};
   double depth_integral_{0.0};

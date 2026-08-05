@@ -83,15 +83,29 @@ lane_vision_controller_node:
     min_pwm: 1300
     max_pwm: 1700
     rc_pwm_span: 400.0
-    lane_forward_pwm: 1700
+    lane_forward_pwm: 1650
+    lane_forward_slow_pwm: 1532
+    lane_lookahead_distance_m: 1.0
+    lane_rejoin_cross_track_tolerance_m: 0.25
+    lane_rejoin_heading_tolerance_rad: 0.2618
+    lane_forward_full_heading_rad: 0.1745
+    lane_forward_stop_heading_rad: 0.5236
+    lane_transfer_forward_pwm: 1600
+    lane_transfer_slowdown_distance_m: 0.75
+    lane_transfer_heading_tolerance_rad: 0.0873
+    lane_transfer_heading_hold_sec: 0.3
+    waypoint_slowdown_distance_m: 0.25
+    waypoint_settle_speed_mps: 0.15
+    waypoint_settle_hold_sec: 0.3
     approach_forward_pwm: 1560
     approach_forward_max_pwm: 1700
     waypoint_heading_tolerance_rad: 0.1745
-    waypoint_yaw_kp: 1.15
-    waypoint_yaw_ki: 0.15
-    waypoint_yaw_kd: 0.08
-    waypoint_yaw_integral_limit: 2.0
-    max_waypoint_yaw_delta_pwm: 180
+    waypoint_heading_release_rad: 0.3491
+    waypoint_yaw_kp: 0.8
+    waypoint_yaw_ki: 0.1
+    waypoint_yaw_kd: 0.02
+    waypoint_yaw_integral_limit: 0.7
+    max_waypoint_yaw_delta_pwm: 160
     waypoint_yaw_invert: true
     vision_yaw_kp_pwm: 100.0
     max_vision_yaw_delta_pwm: 100
