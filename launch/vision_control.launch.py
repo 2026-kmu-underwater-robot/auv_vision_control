@@ -9,6 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description() -> LaunchDescription:
     config_file = LaunchConfiguration("config_file")
+    arena_config_file = LaunchConfiguration("arena_config_file")
     model_path = LaunchConfiguration("model_path")
     start_imx219 = LaunchConfiguration("start_imx219")
     camera0_topic = LaunchConfiguration("camera0_topic")
@@ -47,6 +48,20 @@ def generate_launch_description() -> LaunchDescription:
                     [FindPackageShare("auv_vision_control"), "config", "vision_control.yaml"]
                 ),
                 description="Shared YOLO, WebRTC, and lane-controller configuration.",
+            ),
+            DeclareLaunchArgument(
+                "arena_config_file",
+                default_value=PathJoinSubstitution(
+                    [
+                        FindPackageShare("auv_vision_control"),
+                        "config",
+                        "arena_bottom_left.yaml",
+                    ]
+                ),
+                description=(
+                    "Arena profile loaded after config_file. Select "
+                    "arena_bottom_left.yaml or arena_bottom_right.yaml to match hydrophone_ctrl."
+                ),
             ),
             DeclareLaunchArgument(
                 "model_path",
@@ -93,7 +108,7 @@ def generate_launch_description() -> LaunchDescription:
                 executable="lane_vision_controller_node",
                 name="lane_vision_controller_node",
                 output="screen",
-                parameters=[config_file],
+                parameters=[config_file, arena_config_file],
             ),
         ]
     )

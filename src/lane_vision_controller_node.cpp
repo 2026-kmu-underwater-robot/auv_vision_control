@@ -241,8 +241,8 @@ private:
     max_pwm_ = declare_parameter<int>("max_pwm", 1700);
     rc_pwm_span_ = declare_parameter<double>("rc_pwm_span", 400.0);
 
-    lane_forward_pwm_ = declare_parameter<int>("lane_forward_pwm", 1650);
-    lane_forward_slow_pwm_ = declare_parameter<int>("lane_forward_slow_pwm", 1532);
+    lane_forward_pwm_ = declare_parameter<int>("lane_forward_pwm", 1680);
+    lane_forward_slow_pwm_ = declare_parameter<int>("lane_forward_slow_pwm", 1560);
     lane_lookahead_distance_m_ =
       declare_parameter<double>("lane_lookahead_distance_m", 1.0);
     lane_rejoin_cross_track_tolerance_m_ =
@@ -254,7 +254,11 @@ private:
     lane_forward_stop_heading_rad_ =
       declare_parameter<double>("lane_forward_stop_heading_rad", 0.5236);
     lane_transfer_forward_pwm_ =
-      declare_parameter<int>("lane_transfer_forward_pwm", 1600);
+      declare_parameter<int>("lane_transfer_forward_pwm", 1680);
+    lane_transfer_dynamic_rejoin_ =
+      declare_parameter<bool>("lane_transfer_dynamic_rejoin", true);
+    lane_end_transition_distance_m_ =
+      declare_parameter<double>("lane_end_transition_distance_m", 3.0);
     lane_transfer_slowdown_distance_m_ =
       declare_parameter<double>("lane_transfer_slowdown_distance_m", 0.75);
     lane_transfer_heading_tolerance_rad_ =
@@ -372,6 +376,10 @@ private:
       lane_forward_stop_heading_rad_ > M_PI ||
       lane_transfer_forward_pwm_ < lane_forward_slow_pwm_ ||
       lane_transfer_forward_pwm_ > lane_forward_pwm_ ||
+      !std::isfinite(lane_end_transition_distance_m_) ||
+      lane_end_transition_distance_m_ < 0.0 ||
+      lane_end_transition_distance_m_ >=
+      arena_length_m_ - 2.0 * arena_safety_margin_m_ ||
       lane_transfer_slowdown_distance_m_ < waypoint_reach_tolerance_m_ ||
       lane_transfer_heading_tolerance_rad_ <= 0.0 ||
       lane_transfer_heading_tolerance_rad_ > M_PI ||
@@ -1111,9 +1119,14 @@ private:
     }
   }
 
-  // 레인 간 이동을 제자리 정렬, 연결선 추종, 새 레인 정렬의 세 단계로 수행한다.
+  // 설정에 따라 동적 LOS 합류 또는 기존 3단계 레인 전환을 수행한다.
   void run_lane_transfer(std::array<uint16_t, 18> & channels)
   {
+    if (lane_transfer_dynamic_rejoin_) {
+      run_dynamic_lane_transfer(channels);
+      return;
+    }
+
     set_neutral_control(channels);
     hold_mission_depth(channels);
     const Vec2 transfer_delta = waypoint_ - lane_transfer_start_;
@@ -1208,6 +1221,36 @@ private:
     }
   }
 
+  // 새 레인의 앞쪽 LOS 지점으로 바로 향해 두 번의 제자리 yaw 정렬을 없앤다.
+  void run_dynamic_lane_transfer(std::array<uint16_t, 18> & channels)
+  {
+    if (!active_lane_index_) {
+      transition_to(State::FAILSAFE, "dynamic lane transfer without an active lane");
+      return;
+    }
+
+    apply_active_lane_los(channels, lane_transfer_forward_pwm_);
+    const double cross_track = lane_planner_->cross_track_distance(
+      current_position_, *active_lane_index_);
+    const Vec2 lane_direction = active_lane_direction();
+    const double lane_heading = std::atan2(lane_direction.y, lane_direction.x);
+    const double lane_heading_error = wrap_pi(lane_heading - current_yaw_rad_);
+    if (
+      cross_track > lane_rejoin_cross_track_tolerance_m_ ||
+      std::abs(lane_heading_error) > lane_rejoin_heading_tolerance_rad_)
+    {
+      return;
+    }
+
+    lane_transfer_enabled_ = false;
+    lane_transfer_heading_stable_started_at_.reset();
+    reset_waypoint_pid();
+    detection_confirm_started_at_.reset();
+    transition_to(
+      State::LANE_FOLLOWING_WITH_SEARCH,
+      "new lane dynamically acquired without a second yaw alignment");
+  }
+
   // 지정 방향 오차가 허용 범위 안에서 설정 시간 유지되었는지 확인한다.
   bool lane_transfer_heading_stable(const double desired_yaw)
   {
@@ -1234,6 +1277,19 @@ private:
     }
     const double endpoint_distance = distance(current_position_, active_lane_finish_);
     if (
+      lane_end_transition_distance_m_ > 0.0 &&
+      endpoint_distance <= lane_end_transition_distance_m_)
+    {
+      RCLCPP_INFO(
+        get_logger(),
+        "Starting next-lane rejoin %.2f m before the active lane endpoint",
+        endpoint_distance);
+      lane_completed_[*active_lane_index_] = true;
+      active_lane_index_.reset();
+      select_next_lane("active lane early-transition point reached", true);
+      return;
+    }
+    if (
       endpoint_distance <= lane_lookahead_distance_m_ &&
       follow_waypoint(channels, active_lane_finish_, lane_forward_pwm_))
     {
@@ -1243,7 +1299,7 @@ private:
       return;
     }
     if (endpoint_distance > lane_lookahead_distance_m_) {
-      apply_active_lane_los(channels);
+      apply_active_lane_los(channels, lane_forward_pwm_);
     }
 
     const double progress = active_lane_progress();
@@ -1281,7 +1337,7 @@ private:
       transition_to(State::FAILSAFE, "return requested without an active lane");
       return;
     }
-    apply_active_lane_los(channels);
+    apply_active_lane_los(channels, lane_forward_pwm_);
     const double cross_track = lane_planner_->cross_track_distance(
       current_position_, *active_lane_index_);
     const Vec2 lane_direction = active_lane_direction();
@@ -1336,7 +1392,8 @@ private:
   }
 
   // 고정 waypoint 대신 현재 위치에서 계속 갱신되는 LOS 목표로 레인을 추종한다.
-  void apply_active_lane_los(std::array<uint16_t, 18> & channels)
+  void apply_active_lane_los(
+    std::array<uint16_t, 18> & channels, const int maximum_forward_pwm)
   {
     set_neutral_control(channels);
     hold_mission_depth(channels);
@@ -1350,7 +1407,7 @@ private:
     set_heading_control(channels, desired_yaw);
     set_channel(
       channels, forward_channel_,
-      forward_pwm_for_heading(std::abs(heading_error), lane_forward_pwm_));
+      forward_pwm_for_heading(std::abs(heading_error), maximum_forward_pwm));
   }
 
   // 목표 위치를 향해 방향을 맞추고 허용 오차 안에서 전진한다.
@@ -1780,14 +1837,16 @@ private:
   int min_pwm_{1300};
   int max_pwm_{1700};
   double rc_pwm_span_{400.0};
-  int lane_forward_pwm_{1650};
-  int lane_forward_slow_pwm_{1532};
+  int lane_forward_pwm_{1680};
+  int lane_forward_slow_pwm_{1560};
   double lane_lookahead_distance_m_{1.0};
   double lane_rejoin_cross_track_tolerance_m_{0.25};
   double lane_rejoin_heading_tolerance_rad_{0.2618};
   double lane_forward_full_heading_rad_{0.1745};
   double lane_forward_stop_heading_rad_{0.5236};
-  int lane_transfer_forward_pwm_{1600};
+  int lane_transfer_forward_pwm_{1680};
+  bool lane_transfer_dynamic_rejoin_{true};
+  double lane_end_transition_distance_m_{3.0};
   double lane_transfer_slowdown_distance_m_{0.75};
   double lane_transfer_heading_tolerance_rad_{0.0873};
   double lane_transfer_heading_hold_sec_{0.3};

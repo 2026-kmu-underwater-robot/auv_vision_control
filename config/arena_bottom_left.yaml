@@ -1,0 +1,10 @@
+# Vision lane controller arena profile for the competition tank.
+# bottom_left: the arena interior extends toward -Y in the start frame.
+lane_vision_controller_node:
+  ros__parameters:
+    arena_start_corner: bottom_left
+    arena_length_m: 15.0
+    arena_width_m: 16.0
+    arena_offset_x_m: -0.3
+    arena_offset_y_m: 0.3
+    arena_safety_margin_m: 0.5
